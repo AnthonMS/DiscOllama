@@ -1,9 +1,4 @@
-# Dont ignore example files
-!example.whitelist
-!example.blacklist
-!example.env
-!example.modelfile
-
+## 👇👇 Includes at bottom of file 👇👇
 # Ignore all .whitelist and .blacklist files
 *.whitelist
 *.blacklist
@@ -105,3 +100,11 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+
+
+# Dont ignore example files
+!example.whitelist
+!example.blacklist
+!example.env
+!example.modelfile
