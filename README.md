@@ -12,7 +12,9 @@ This is just a stupid idea that I had to try after playing around with Ollama an
 
 So to learn the API and start some kind of project, learning to create a discord bot was something that was on the TODO list as well anyway, I decided this was probably a fun little project. So lets see where this takes me.
 
-## Getting Started (For future. No requirements.txt yet. This is going to change a lot in the next couple of days.)
+Later edit: I have stumpled upon the official discollama discord bot used in the Ollama discord server. This is a very good starting point, so I will be borrowing the code to expand on it instead of reinventing the wheel.
+
+## Getting Started (No requirements.txt yet. This is going to change a lot in the next couple of days.)
 
 1. Clone the repository.
 2. Install the required Python packages by running `pip install -r requirements.txt`.
