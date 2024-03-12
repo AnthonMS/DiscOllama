@@ -4,7 +4,6 @@ import redis
 import ollama
 import discord
 from dotenv import load_dotenv
-# from DiscOllama import DiscOllama
 from src.DiscOllama import DiscOllama
 
 THIS_PATH = os.path.dirname(os.path.realpath(__file__))

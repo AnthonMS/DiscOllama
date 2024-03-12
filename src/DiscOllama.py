@@ -1,11 +1,15 @@
 import os
 import io
 import json
-import discord
+import discord # python3 -m pip install -U "discord.py[voice]"
+from discord.ext import voice_recv # python -m pip install -U discord-ext-voice-recv
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from .Response import Response
+from .Response import Response, VoiceResponse
+import speech_recognition as sr
+import wave
+import time
 
 class DiscOllama:
     def __init__(self, model, ollama, discord, redis):
@@ -76,8 +80,17 @@ class DiscOllama:
             self.stop_authors_tasks(message)
             return
         if (content.lower().startswith('!wipe')):
-            # User requested to stop their tasks
+            # Admin request to wipe chat history
             await self.wipe_messages(message)
+            return
+        if (content.lower().startswith('!join')):
+            # Admin request to join voice chat
+            await self.join_vc(message)
+            # asyncio.create_task(self.join_vc(message))
+            return
+        if (content.lower().startswith('!leave')):
+            # Admin request to leave voice chat
+            await self.leave_vc(message)
             return
         
         
@@ -275,3 +288,103 @@ class DiscOllama:
                 answer_task.cancel()
                 response.message.add_reaction('❌')
                 
+    async def join_vc(self, message):
+        logging.info(f"Joining Voicechat with user {message.author.name}")
+        if not message.channel:
+            message.author.send("I cannot join a voice channel in a DM!")
+            return
+        if message.author.voice is None:
+            await message.channel.send("You're not connected to a voice channel!")
+            return
+        if self.discord.voice_clients:
+            # vc = await self.discord.voice_clients[0].move_to(voice_channel)
+            await message.channel.send("I'm already speaking to someone else. Go away!")
+            return
+        
+        voice_channel = message.author.voice.channel
+        vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
+        await message.channel.send(f"Joined {voice_channel.name}!")
+        
+        # audio_buffer = bytearray()
+        voice_response = VoiceResponse()
+        # last_received = None
+        def callback(user, data: voice_recv.VoiceData):
+            voice_response.write(user, data.pcm)
+            # nonlocal last_received
+            # audio_buffer.extend(audio_data)
+            # last_received = datetime.now()
+            # # Process the audio data using a speech-to-text library
+            # text = self.convert_audio_to_text(audio_data)
+            
+
+        vc.listen(voice_recv.BasicSink(callback))
+        # joined = True
+        # while joined:
+        #     await asyncio.sleep(0.1)  # Check every 100ms
+        #     if last_received and datetime.now() - last_received > timedelta(seconds=2):
+        #         # 2 seconds have passed since the last packet, stop accumulating
+        #         audio_data = bytes(audio_buffer)
+        #         audio_buffer.clear()
+        #         last_received = None
+        #         text = await self.convert_audio_to_text(audio_data)
+        #         # print(text)
+        #         # logging.info(f"Google Speech Recognition thinks you said: {text}")
+                
+                
+    async def leave_vc(self, message):
+        logging.info(f"Leaving Voicechat with user {message.author.name}")
+        if not message.channel:
+            message.author.send("I cannot leave a voice channel in a DM!")
+            return
+        if message.author.voice is None:
+            await message.channel.send("You're not connected to a voice channel!")
+            return
+        
+        voice_channel = message.author.voice.channel
+        if self.discord.voice_clients:
+            if self.discord.voice_clients[0].channel == voice_channel:
+                await self.discord.voice_clients[0].disconnect()
+                await message.channel.send(f"Left {voice_channel.name}!")
+            else:
+                await message.channel.send("We're not in the same voice channel!")
+                
+                
+    async def convert_audio_to_text(self, audio_data):
+        # Generate a unique filename based on the current time
+        filename = f"audio_{int(time.time())}.wav"
+
+        # Write the PCM data to a WAV file
+        with wave.open(filename, 'wb') as wav_file:
+            wav_file.setnchannels(2)  # stereo
+            wav_file.setsampwidth(2)  # 2 bytes = 16 bits
+            wav_file.setframerate(48000)  # sample rate
+            wav_file.writeframes(audio_data)
+
+        # recognizer = sr.Recognizer()
+
+        # with sr.AudioFile(filename) as source:
+        #     try:
+        #         audio_text = recognizer.recognize_google(source)
+        #         logging.info(f"Google Speech Recognition thinks you said: {audio_text}")
+        #         return audio_text
+        #     except sr.UnknownValueError:
+        #         logging.warning("Google Speech Recognition could not understand audio")
+        #     except sr.RequestError as e:
+        #         logging.error(f"Could not request results from Google Speech Recognition service; {e}")
+
+        # return None 
+    
+    # async def convert_audio_to_text(self, audio_data):
+    #     recognizer = sr.Recognizer()
+
+    #     with sr.AudioFile(audio_data) as source:
+    #         try:
+    #             audio_text = recognizer.recognize_google(source)
+    #             logging.info(f"Google Speech Recognition thinks you said: {audio_text}")
+    #             return audio_text
+    #         except sr.UnknownValueError:
+    #             logging.warning("Google Speech Recognition could not understand audio")
+    #         except sr.RequestError as e:
+    #             logging.error(f"Could not request results from Google Speech Recognition service; {e}")
+
+    #     return None

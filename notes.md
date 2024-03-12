@@ -10,3 +10,29 @@ $: docker pull redis
 $: docker run -d --name my-redis-container -p 6379:6379 redis
 $: docker start my-redis-container
 $: docker exec -it 593d15ed477c redis-cli FLUSHALL
+
+
+
+
+
+
+
+
+
+
+
+Getting voice to work was a hassle. So here are some notes for later so I remember how I got around the import errors.
+
+First of all, discord library HAS to be installed from github discord.py and it HAS to be discord.py. Having another discord library in the same environment will mess with things. Do NOT install `discord`, always install `discord.py`
+```
+$ git clone https://github.com/Rapptz/discord.py
+$ cd discord.py
+$ python3 -m pip install -U .[voice]
+```
+
+After that we can install the extension:
+```
+pip install -U discord-ext-voice-recv
+```
+
+When installed this way, there should be no problems.
