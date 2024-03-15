@@ -6,6 +6,7 @@ import discord
 from dotenv import load_dotenv
 from src.DiscOllama import DiscOllama
 import torch
+import pyttsx3
 from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
 
 THIS_PATH = os.path.dirname(os.path.realpath(__file__))
@@ -36,5 +37,6 @@ if __name__ == '__main__':
         ollama.AsyncClient(host=os.getenv("OLLAMA_HOST_URL"), auth=(os.getenv("BASIC_AUTH_USERNAME"), os.getenv("BASIC_AUTH_PASSWORD")), verify=False),
         discord.Client(intents=intents),
         redis.Redis(host=str(os.getenv("REDIS_HOST")), port=int(os.getenv("REDIS_PORT")), db=0, decode_responses=True),
-        speech_processor=speech_processor
+        speech_processor=speech_processor,
+        tts=pyttsx3.init()
     ).run(os.getenv("DISCORD_TOKEN"))

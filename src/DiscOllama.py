@@ -9,13 +9,15 @@ from datetime import datetime, timedelta
 from .Response import Response, VoiceResponse
 
 class DiscOllama:
-    def __init__(self, model, ollama, discord, redis, speech_processor):
+    def __init__(self, model, ollama, discord, redis, speech_processor, tts):
         self.model = model
         self.model_voice = "openhermes-voice:latest"
         self.ollama = ollama
         self.discord = discord
         self.redis = redis
         self.speech_processor = speech_processor
+        self.tts = tts
+        self.vc = None
         
         self.writing_tasks = {}
         
@@ -193,18 +195,18 @@ class DiscOllama:
             await self.save_message(response.message, full_response)
        
        
-    async def talking(self, voiceResponse):
+    async def talking(self, voiceResponse, filename):
         full_response = ""
         try:
-            chat_history = await self.get_voice_messages(voiceResponse.message.author.voice.channel.id)
+            chat_history = await self.get_voice_messages(voiceResponse.voice_channel.channel.id)
             
             async for part in self.chat(chat_history, seconds=5, model=self.model_voice):
                 # print(part['message']['content'], end='', flush=True)
                 part_content = part['message']['content']
                 full_response += part_content
-                await voiceResponse.ai_write(part_content, end='...')
+                await voiceResponse.ai_write(part_content, end='...', filename=filename)
                     
-            await voiceResponse.ai_write('')
+            await voiceResponse.ai_write('', filename=filename)
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -214,7 +216,7 @@ class DiscOllama:
         finally:
             # await response.message.remove_reaction('🤔', self.discord.user) # Make sure we remove thinking reaction when done answering
             # del self.writing_tasks[response.message.id]  # Remove the task from the dictionary
-            await self.save_voice_message(voiceResponse.message.author.voice.channel.id, full_response, self.discord.user)
+            await self.save_voice_message(voiceResponse.voice_channel.channel.id, full_response, self.discord.user)
     
     
     async def chat(self, messages, seconds=1, model=None):
@@ -364,7 +366,7 @@ class DiscOllama:
         vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
         await message.channel.send(f"Joined {voice_channel.name}!")
         
-        voice_response = VoiceResponse(message, self)
+        voice_response = VoiceResponse(vc, self)
         def callback(user, data: voice_recv.VoiceData):
             voice_response.user_speak(user, data.pcm)
         vc.listen(voice_recv.BasicSink(callback))

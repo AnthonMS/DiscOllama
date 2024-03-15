@@ -9,6 +9,8 @@ import torchaudio
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 import soundfile as sf
 import numpy as np
+import os
+from discord import FFmpegPCMAudio
 
 class Response:
     def __init__(self, message):
@@ -41,17 +43,19 @@ class Response:
             self.r = await self.author.send(value)
        
        
+       
+       
+       
+       
 ## This will listen to user audio in connected voice channel and save it to a file when user stops speaking for 2 seconds
 class VoiceResponse:
-    def __init__(self, message, discOllama) -> None:
-        self.message = message
+    def __init__(self, voice_channel, discOllama) -> None:
+        self.voice_channel = voice_channel
         self.discOllama = discOllama
         self.speech_device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        self.speech_torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
+        # self.speech_torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         self.audio_buffers = {} # Each userkey will have: status, audio_buffer, last_written
-        self.last_written = {}
         self.filename_counter = 0
-        self.new_audio = {}
         self._task = asyncio.create_task(self._background_task())
         self.sb = io.StringIO()
         
@@ -59,12 +63,13 @@ class VoiceResponse:
         while True:
             await asyncio.sleep(0.1)  # Check every 100ms
             for user in list(self.audio_buffers.keys()):
-                for audio_buffer in self.audio_buffers[user]:
-                    if audio_buffer['status'] == 'incoming' and datetime.now() - audio_buffer['last_written'] > timedelta(seconds=2):
-                        audio_buffer['status'] = 'processing'
+                for audio_buffer_dict in self.audio_buffers[user]:
+                    if audio_buffer_dict['status'] == 'incoming' and datetime.now() - audio_buffer_dict['last_written'] > timedelta(seconds=2):
+                        audio_buffer_dict['status'] = 'processing'
                         filename = f"audio/audio_{user}_{self.filename_counter}.wav"
-                        asyncio.create_task(self.process_audio(filename, audio_buffer['audio_buffer'], user))
+                        audio_buffer_dict['filename'] = filename
                         self.filename_counter += 1
+                        asyncio.create_task(self.process_audio(audio_buffer_dict, user))
                         break  # Only process one audio buffer at a time for each user
             
             
@@ -87,7 +92,7 @@ class VoiceResponse:
                 
         
     
-    async def ai_write(self, text, end=''):
+    async def ai_write(self, text, end='', filename=''):
         self.sb.write(text + end)
         
         value = self.sb.getvalue().strip()
@@ -95,30 +100,47 @@ class VoiceResponse:
             return
         if text == '' and end == '':
             ## Done generating response. Here we should respond with text to speech
-            logging.info(f"AI response: {value}")
+            logging.info(f"AI response to file {filename}: {value}")
+            base_filename = filename.replace(".wav", "")
+            response_filename = f"{base_filename}.response.wav"
+            self.text_to_speech(value, response_filename)
+            
             self.sb.seek(0, io.SEEK_SET)
             self.sb.truncate()
             return
       
         
-    async def process_audio(self, filename, audio_buffer, user):
+    async def process_audio(self, audio_buffer_dict, user):
         loop = asyncio.get_event_loop()
+        audio_buffer = audio_buffer_dict['audio_buffer']
+        
+        # Calculate the duration of the audio clip
+        num_samples = len(audio_buffer) // 2  # Each sample is 2 bytes
+        duration = num_samples / (48000 * 2)  # Sample rate is 48000 Hz and 2 channels
+        # logging.info(f"Audio duration {audio_buffer_dict['filename']}: {duration:.2f} seconds")
+        if duration < 0.5:
+            return
+        
         audio_data = self.convert_audio_data(audio_buffer)
-        await self.save_to_wav(filename, audio_data, channels=1, sampwidth=2, framerate=16000)
+        await self.save_to_wav(audio_buffer_dict['filename'], audio_data, channels=1, sampwidth=2, framerate=16000)
         
         # Convert bytearray to numpy array
         # audio_buffer_np = np.frombuffer(self.audio_buffers[user], dtype=np.int16)
         
-        future = loop.run_in_executor(None, self.discOllama.speech_processor, filename)
+        future = loop.run_in_executor(None, self.discOllama.speech_processor, audio_buffer_dict['filename'])
         text = await future
-        logging.info(f"The text from {filename} is: {text['text']}")
-        # await self.discOllama.save_voice_message(self.message.author.voice.channel.id, text['text'], user)
-        # talking = asyncio.create_task(self.discOllama.talking(self))
+        logging.info(f"The text from {audio_buffer_dict['filename']} is: {text['text']}")
         if len(text['text'].strip().split()) > 2:
-            await self.discOllama.save_voice_message(self.message.author.voice.channel.id, text['text'], user)
-            talking = asyncio.create_task(self.discOllama.talking(self))
+            await self.discOllama.save_voice_message(self.voice_channel.channel.id, text['text'], user)
+            talking = asyncio.create_task(self.discOllama.talking(self, audio_buffer_dict['filename']))
         
 
+    def text_to_speech(self, text, filename):
+        self.discOllama.tts.save_to_file(text, filename)
+        self.discOllama.tts.runAndWait()
+        source = FFmpegPCMAudio(filename)
+        self.voice_channel.play(source)
+        
         
     async def save_to_wav(self, filename, audio_data, channels=2, sampwidth=2, framerate=48000):
         # Write audio data to a WAV file
