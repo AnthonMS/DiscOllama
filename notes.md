@@ -1,3 +1,17 @@
+pip install -U transformers torch
+pip install -U accelerate
+pip install -U numpy
+pip install -U soundfile
+pip install -U torchaudio
+
+
+
+
+
+
+
+
+
 To create custom model based on another model.
 
 $: ollama show phi --modelfile
@@ -5,6 +19,7 @@ $: ollama show phi --modelfile > discord-modelfile
 $: ollama create discord-phi --file discord-modelfile
 
 $: ollama create openhermes-discord --file openhermes-discord-modelfile
+$: ollama create openhermes-voice --file openhermes-voice.modelfile
 
 $: docker pull redis
 $: docker run -d --name my-redis-container -p 6379:6379 redis

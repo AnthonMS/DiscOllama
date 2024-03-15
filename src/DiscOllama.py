@@ -7,18 +7,17 @@ import logging
 import asyncio
 from datetime import datetime, timedelta
 from .Response import Response, VoiceResponse
-import speech_recognition as sr
-import wave
-import time
 
 class DiscOllama:
-    def __init__(self, model, ollama, discord, redis):
+    def __init__(self, model, ollama, discord, redis, speech_processor):
         self.model = model
+        self.model_voice = "openhermes-voice:latest"
         self.ollama = ollama
         self.discord = discord
         self.redis = redis
+        self.speech_processor = speech_processor
         
-        self.answering_tasks = {}
+        self.writing_tasks = {}
         
         try:
             with open('dm.whitelist', 'r') as f:
@@ -35,6 +34,8 @@ class DiscOllama:
         # register event handlers
         self.discord.event(self.on_ready)
         self.discord.event(self.on_message)
+        
+        
         
         
     def run(self, token):
@@ -70,10 +71,8 @@ class DiscOllama:
         content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
         
         if (content.lower().startswith('!test')):
-            # await message.channel.send("Testing...")
             await message.add_reaction('👌')
-            testing = await self.get_messages(message)
-            logging.info(testing)
+            asyncio.create_task(self.test(message))
             return
         if (content.lower().startswith('!stop')):
             # User requested to stop their tasks
@@ -103,10 +102,21 @@ class DiscOllama:
         
         
         r = Response(message)
-        answering = asyncio.create_task(self.answering(r))
-        self.answering_tasks[message.id] = (r, answering)
+        writing = asyncio.create_task(self.writing(r))
+        self.writing_tasks[message.id] = (r, writing)
     
     
+    async def test(self, message):
+        logging.info("Testing...")
+        
+        voice_channel = message.author.voice.channel.id
+        test = await self.get_voice_messages(voice_channel)
+        logging.info(test)
+        logging.info("Testing done!")
+        # loop = asyncio.get_event_loop()
+        # future = loop.run_in_executor(None, self.speech_processor, 'src/old/audio_benteb3nt_0.wav')
+        # text = await future
+        # logging.info(text['text'])
     
     async def check_message_conditions(self, message):
         if message.guild is not None and (os.getenv("DISCORD_SERVER") and int(message.guild.id) != int(os.getenv("DISCORD_SERVER"))):
@@ -154,19 +164,13 @@ class DiscOllama:
         finally:
             await message.remove_reaction('🤔', self.discord.user)
         
-    async def answering(self, response):
+    async def writing(self, response):
         full_response = ""
         try:
             thinking = asyncio.create_task(self.thinking(response.message))
             chat_history = await self.get_messages(response.message)
-            messages = [{
-                    "role": "assistant" if msg["author"] == self.discord.user.id else "user",
-                    "content": msg["content"],}
-                for msg in chat_history
-            ]
-            # messages.append({"role": "user", "content": content})
             
-            async for part in self.chat(messages):
+            async for part in self.chat(chat_history):
                 if thinking is not None and not thinking.done():
                     thinking.cancel()
                 # print(part['message']['content'], end='', flush=True)
@@ -185,20 +189,46 @@ class DiscOllama:
             if thinking is not None and not thinking.done():
                 thinking.cancel()
             await response.message.remove_reaction('🤔', self.discord.user) # Make sure we remove thinking reaction when done answering
-            del self.answering_tasks[response.message.id]  # Remove the task from the dictionary
+            del self.writing_tasks[response.message.id]  # Remove the task from the dictionary
             await self.save_message(response.message, full_response)
        
-
-    async def chat(self, messages):
+       
+    async def talking(self, voiceResponse):
+        full_response = ""
+        try:
+            chat_history = await self.get_voice_messages(voiceResponse.message.author.voice.channel.id)
+            
+            async for part in self.chat(chat_history, seconds=5, model=self.model_voice):
+                # print(part['message']['content'], end='', flush=True)
+                part_content = part['message']['content']
+                full_response += part_content
+                await voiceResponse.ai_write(part_content, end='...')
+                    
+            await voiceResponse.ai_write('')
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logging.error("Error talking")
+            logging.error(e)
+            pass
+        finally:
+            # await response.message.remove_reaction('🤔', self.discord.user) # Make sure we remove thinking reaction when done answering
+            # del self.writing_tasks[response.message.id]  # Remove the task from the dictionary
+            await self.save_voice_message(voiceResponse.message.author.voice.channel.id, full_response, self.discord.user)
+    
+    
+    async def chat(self, messages, seconds=1, model=None):
+        if model is None:
+            model = self.model
         sb = io.StringIO() # create new StringIO object that can write and read from a string buffer
         t = datetime.now()
         try:
-            generator = await self.ollama.chat(self.model, messages=messages, stream=True)
+            generator = await self.ollama.chat(model, messages=messages, stream=True)
             async for part in generator:
                 sb.write(part['message']['content']) # write content to StringIO buffer
                 # print(part['message']['content'], end='', flush=True)
             
-                if part['done'] or datetime.now() - t > timedelta(seconds=1):
+                if part['done'] or datetime.now() - t > timedelta(seconds=seconds):
                     part['message']['content'] = sb.getvalue()
                     yield part
                     t = datetime.now()
@@ -240,6 +270,11 @@ class DiscOllama:
         # Convert the messages from JSON format to Python dictionaries
         messages = [json.loads(msg) for msg in messages]
 
+        messages = [{
+                "role": "assistant" if msg["author"] == self.discord.user.id else "user",
+                "content": msg["content"],}
+            for msg in messages.copy()
+        ]
         return messages
 
     async def save_message(self, message, response:str=None):
@@ -260,8 +295,32 @@ class DiscOllama:
             "id": message.id,
             "attachments": [attachment.url for attachment in message.attachments] if response is None else [],
         }))
+    
+    
+    async def save_voice_message(self, channel, text, user):
+        if (user.id == self.discord.user.id):
+            content = text
+        else:
+            content = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' ' + str(text) + "\n\nSaid by: " + str(user.name)
         
+        self.redis.rpush(f"discord:voice:{channel}", json.dumps({
+            "author": user.id,
+            "content": content,
+        }))
 
+
+    async def get_voice_messages(self, channel):
+        messages = self.redis.lrange(f"discord:voice:{channel}", 0, -1)
+
+        # Convert the messages from JSON format to Python dictionaries
+        messages = [json.loads(msg) for msg in messages]
+
+        messages = [{
+                "role": "assistant" if msg["author"] == self.discord.user.id else "user",
+                "content": msg["content"],}
+            for msg in messages.copy()
+        ]
+        return messages
 
     async def wipe_messages(self, message):
         if message.guild is None: # DM
@@ -283,7 +342,7 @@ class DiscOllama:
         return False
         
     async def stop_authors_tasks(self, message):
-        for message_id, (response, answer_task) in self.answering_tasks.items():
+        for message_id, (response, answer_task) in self.writing_tasks.items():
             if response.message.author.id == message.author.id:
                 answer_task.cancel()
                 response.message.add_reaction('❌')
@@ -305,30 +364,10 @@ class DiscOllama:
         vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
         await message.channel.send(f"Joined {voice_channel.name}!")
         
-        # audio_buffer = bytearray()
-        voice_response = VoiceResponse()
-        # last_received = None
+        voice_response = VoiceResponse(message, self)
         def callback(user, data: voice_recv.VoiceData):
-            voice_response.write(user, data.pcm)
-            # nonlocal last_received
-            # audio_buffer.extend(audio_data)
-            # last_received = datetime.now()
-            # # Process the audio data using a speech-to-text library
-            # text = self.convert_audio_to_text(audio_data)
-            
-
+            voice_response.user_speak(user, data.pcm)
         vc.listen(voice_recv.BasicSink(callback))
-        # joined = True
-        # while joined:
-        #     await asyncio.sleep(0.1)  # Check every 100ms
-        #     if last_received and datetime.now() - last_received > timedelta(seconds=2):
-        #         # 2 seconds have passed since the last packet, stop accumulating
-        #         audio_data = bytes(audio_buffer)
-        #         audio_buffer.clear()
-        #         last_received = None
-        #         text = await self.convert_audio_to_text(audio_data)
-        #         # print(text)
-        #         # logging.info(f"Google Speech Recognition thinks you said: {text}")
                 
                 
     async def leave_vc(self, message):
@@ -349,42 +388,3 @@ class DiscOllama:
                 await message.channel.send("We're not in the same voice channel!")
                 
                 
-    async def convert_audio_to_text(self, audio_data):
-        # Generate a unique filename based on the current time
-        filename = f"audio_{int(time.time())}.wav"
-
-        # Write the PCM data to a WAV file
-        with wave.open(filename, 'wb') as wav_file:
-            wav_file.setnchannels(2)  # stereo
-            wav_file.setsampwidth(2)  # 2 bytes = 16 bits
-            wav_file.setframerate(48000)  # sample rate
-            wav_file.writeframes(audio_data)
-
-        # recognizer = sr.Recognizer()
-
-        # with sr.AudioFile(filename) as source:
-        #     try:
-        #         audio_text = recognizer.recognize_google(source)
-        #         logging.info(f"Google Speech Recognition thinks you said: {audio_text}")
-        #         return audio_text
-        #     except sr.UnknownValueError:
-        #         logging.warning("Google Speech Recognition could not understand audio")
-        #     except sr.RequestError as e:
-        #         logging.error(f"Could not request results from Google Speech Recognition service; {e}")
-
-        # return None 
-    
-    # async def convert_audio_to_text(self, audio_data):
-    #     recognizer = sr.Recognizer()
-
-    #     with sr.AudioFile(audio_data) as source:
-    #         try:
-    #             audio_text = recognizer.recognize_google(source)
-    #             logging.info(f"Google Speech Recognition thinks you said: {audio_text}")
-    #             return audio_text
-    #         except sr.UnknownValueError:
-    #             logging.warning("Google Speech Recognition could not understand audio")
-    #         except sr.RequestError as e:
-    #             logging.error(f"Could not request results from Google Speech Recognition service; {e}")
-
-    #     return None
