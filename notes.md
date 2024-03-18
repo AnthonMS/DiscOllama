@@ -3,6 +3,7 @@ pip install -U accelerate
 pip install -U numpy
 pip install -U soundfile
 pip install -U torchaudio
+pip install -U pyttsx3
 
 
 

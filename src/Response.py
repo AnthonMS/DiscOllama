@@ -1,5 +1,6 @@
 import asyncio
 import io
+import re
 import wave
 from datetime import datetime, timedelta
 import speech_recognition as sr
@@ -11,6 +12,7 @@ import soundfile as sf
 import numpy as np
 import os
 from discord import FFmpegPCMAudio
+from discord.ext import voice_recv
 
 class Response:
     def __init__(self, message):
@@ -56,24 +58,36 @@ class VoiceResponse:
         # self.speech_torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
         self.audio_buffers = {} # Each userkey will have: status, audio_buffer, last_written
         self.filename_counter = 0
-        self._task = asyncio.create_task(self._background_task())
+        self._task_incoming_audio = asyncio.create_task(self._task_incoming())
+        self._task_outgoing_audio = asyncio.create_task(self._task_outgoing())
         self.sb = io.StringIO()
+        self.user_speaking = False
+        self.responding = False
+        self.speaking_task = None
+        self.responding_task = None
+        self.no_of_responses = 0
+        self.responses = []
         
-    async def _background_task(self):
-        while True:
-            await asyncio.sleep(0.1)  # Check every 100ms
-            for user in list(self.audio_buffers.keys()):
-                for audio_buffer_dict in self.audio_buffers[user]:
-                    if audio_buffer_dict['status'] == 'incoming' and datetime.now() - audio_buffer_dict['last_written'] > timedelta(seconds=2):
-                        audio_buffer_dict['status'] = 'processing'
-                        filename = f"audio/audio_{user}_{self.filename_counter}.wav"
-                        audio_buffer_dict['filename'] = filename
-                        self.filename_counter += 1
-                        asyncio.create_task(self.process_audio(audio_buffer_dict, user))
-                        break  # Only process one audio buffer at a time for each user
+        self.voice_channel.listen(voice_recv.BasicSink(self.user_speak))
+        
+        
+    def user_speak(self, user, data: voice_recv.VoiceData):
+        self.user_speaking = True
+        if self.voice_channel.is_playing():
+            self.voice_channel.pause()
             
-            
-    def user_speak(self, user, pcm_audio: bytes):
+        try:
+            self.responding_task.cancel()
+        except Exception as e:
+            pass
+        try:
+            self.speaking_task.cancel()
+        except Exception as e:
+            pass
+        
+        # self.responding = False
+        # self.responses = []
+        
         if user not in self.audio_buffers:
             self.audio_buffers[user] = [{'status': 'incoming', 'audio_buffer': bytearray(), 'last_written': datetime.now()}]
 
@@ -84,32 +98,75 @@ class VoiceResponse:
                 audio_buffer = {'status': 'incoming', 'audio_buffer': bytearray(), 'last_written': datetime.now()}
                 self.audio_buffers[user].append(audio_buffer)
 
-            audio_buffer['audio_buffer'].extend(pcm_audio)
+            audio_buffer['audio_buffer'].extend(data.pcm)
             audio_buffer['last_written'] = datetime.now()
         except Exception as e:
             logging.error(f"Error in user_speak")
-            logging.error(e)    
-                
-        
-    
-    async def ai_write(self, text, end='', filename=''):
-        self.sb.write(text + end)
-        
-        value = self.sb.getvalue().strip()
-        if not value:
-            return
-        if text == '' and end == '':
-            ## Done generating response. Here we should respond with text to speech
-            logging.info(f"AI response to file {filename}: {value}")
-            base_filename = filename.replace(".wav", "")
-            response_filename = f"{base_filename}.response.wav"
-            self.text_to_speech(value, response_filename)
+            logging.error(e)   
+          
             
-            self.sb.seek(0, io.SEEK_SET)
-            self.sb.truncate()
-            return
-      
-        
+    async def _task_incoming(self):
+        while True:
+            await asyncio.sleep(0.5)  # Check every 100ms
+            self.process_incoming_audio()
+            self.create_response()
+            
+    async def _task_outgoing(self):
+        while True:
+            await asyncio.sleep(0.5)
+            if self.voice_channel.is_paused() and not self.user_speaking and len(self.responses) > 0:
+                self.voice_channel.resume()
+            elif not self.voice_channel.is_playing() and not self.user_speaking and len(self.responses) > 0:
+                self.speak()
+           
+    
+    def speak(self):
+        try:
+            # response = self.responses.pop(0)
+            response = self.responses[0]
+            source = FFmpegPCMAudio(response)
+            self.voice_channel.play(source, after=self.speak_after)
+        except asyncio.CancelledError:
+            pass
+    
+    def speak_after(self, error):
+        if len(self.responses) > 0:
+            self.responses.pop(0)
+        if not self.user_speaking and len(self.responses) > 0:
+            self.speak()
+    
+    def create_response(self):
+        if not self.responding and not self.user_speaking:
+            # No one is speaking, so it's time to create our response
+            processed_audio_buffers = []
+            for user in list(self.audio_buffers.keys()):
+                # Extract all audio_buffer dictionaries from under any user that has the status "processed"
+                processed_buffers = [audio_buffer_dict for audio_buffer_dict in self.audio_buffers[user] if audio_buffer_dict['status'] == 'processed']
+                processed_audio_buffers.extend(processed_buffers)
+                # Remove all audio_buffer dictionaries from under any user that has the status "processed" or "noise"
+                self.audio_buffers[user] = [audio_buffer_dict for audio_buffer_dict in self.audio_buffers[user] if audio_buffer_dict['status'] not in ['processed', 'noise']]
+            
+            if len(processed_audio_buffers) > 0:
+                try:
+                    self.responding_task.cancel()
+                except Exception as e:
+                    pass
+                # Create a new responding task
+                self.responding_task = asyncio.create_task(self.respond_new())
+    
+    def process_incoming_audio(self):
+        for user in list(self.audio_buffers.keys()):
+            for audio_buffer_dict in self.audio_buffers[user]:
+                if audio_buffer_dict['status'] == 'incoming' and datetime.now() - audio_buffer_dict['last_written'] > timedelta(seconds=1):
+                    self.user_speaking = False
+                    audio_buffer_dict['status'] = 'processing'
+                    filename = f"audio/audio_{user}_{self.filename_counter}.wav"
+                    audio_buffer_dict['filename'] = filename
+                    self.filename_counter += 1
+                    audio_process = asyncio.create_task(self.process_audio(audio_buffer_dict, user))
+                    audio_buffer_dict['task'] = audio_process
+                    break  # Only process one audio buffer at a time for each user
+         
     async def process_audio(self, audio_buffer_dict, user):
         loop = asyncio.get_event_loop()
         audio_buffer = audio_buffer_dict['audio_buffer']
@@ -117,7 +174,6 @@ class VoiceResponse:
         # Calculate the duration of the audio clip
         num_samples = len(audio_buffer) // 2  # Each sample is 2 bytes
         duration = num_samples / (48000 * 2)  # Sample rate is 48000 Hz and 2 channels
-        # logging.info(f"Audio duration {audio_buffer_dict['filename']}: {duration:.2f} seconds")
         if duration < 0.5:
             return
         
@@ -129,18 +185,65 @@ class VoiceResponse:
         
         future = loop.run_in_executor(None, self.discOllama.speech_processor, audio_buffer_dict['filename'])
         text = await future
-        logging.info(f"The text from {audio_buffer_dict['filename']} is: {text['text']}")
-        if len(text['text'].strip().split()) > 2:
-            await self.discOllama.save_voice_message(self.voice_channel.channel.id, text['text'], user)
-            talking = asyncio.create_task(self.discOllama.talking(self, audio_buffer_dict['filename']))
-        
+        textResult = text['text'].strip()
+        if len(text['text'].strip().split()) > 0:
+            tmpStr = re.sub(r'[^\w\s]', '', textResult.lower()) # Keep alphanumeric characters and whitespace
+            if (len(tmpStr.split()) < 10):
+                stop_percentage = self.stop_command_percentage(tmpStr)
+                if stop_percentage >= 75 and self.voice_channel.is_playing():
+                    self.responses = []
+                    self.voice_channel.stop()
+                    audio_buffer_dict['status'] = 'noise'
+                    return
+                # else:
+            self.discOllama.save_voice_message(self.voice_channel.channel.id, text['text'], user)
+            audio_buffer_dict['status'] = 'processed'
+        else:
+            audio_buffer_dict['status'] = 'noise'
+    
+    
+    async def respond_new(self):
+        self.responding = True
+        full_response = ""
+        partial_response = ""
+        try:
+            chat_history = await self.discOllama.get_voice_messages(self.voice_channel.channel.id)
+            async for part in self.discOllama.chat(chat_history, milliseconds=None, model=self.discOllama.model_voice):
+                # print(part['message']['content'])
+                part_content = part['message']['content']
+                full_response += part_content
+                partial_response += part_content
+                
+                # Check if partial_response contains an end sentence indicator
+                sentences = re.split('(?<=[.!?]) +', partial_response)
+                for i in range(len(sentences) - 1):
+                    sentence = sentences[i]
+                    self.no_of_responses += 1
+                    self.text_to_speech(sentence)  # Call text_to_speech for each sentence
+                partial_response = sentences[-1]  # Keep the last part (it doesn't end with an end sentence indicator)
 
-    def text_to_speech(self, text, filename):
+            self.no_of_responses += 1
+            self.text_to_speech(partial_response)  # Call text_to_speech for each sentence
+                    
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logging.error(f"Error generating response")
+            logging.error(e)
+            pass
+        finally:
+            full_response = full_response.strip() 
+            if full_response:  # Check if full_response is not empty
+                self.discOllama.save_voice_response(self.voice_channel.channel.id, full_response)
+            # self.discOllama.save_voice_response(self.voice_channel.channel.id, full_response)
+            self.responding = False
+    
+    def text_to_speech(self, text):
+        filename = f"audio/response_{self.no_of_responses}.wav"
+        self.responses.append(filename)
         self.discOllama.tts.save_to_file(text, filename)
         self.discOllama.tts.runAndWait()
-        source = FFmpegPCMAudio(filename)
-        self.voice_channel.play(source)
-        
+    
         
     async def save_to_wav(self, filename, audio_data, channels=2, sampwidth=2, framerate=48000):
         # Write audio data to a WAV file
@@ -167,12 +270,15 @@ class VoiceResponse:
         waveform_resampled_bytes = waveform_resampled_int16.tobytes()
         return waveform_resampled_bytes
 
-
-
-
-
         
-        
+    def stop_command_percentage(self, text):
+        stop_commands = ["stop", "quiet", "silence", "talking", "please", "now", "shut", "up", "fuck"]
+        words = text.split()
+        matching_words = [word for word in words if word in stop_commands]
+        if len(words) == 0:
+            return 0
+        else:
+            return len(matching_words) / len(words) * 100
         
         
         

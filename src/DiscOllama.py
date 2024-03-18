@@ -109,12 +109,15 @@ class DiscOllama:
     
     
     async def test(self, message):
-        logging.info("Testing...")
-        
-        voice_channel = message.author.voice.channel.id
-        test = await self.get_voice_messages(voice_channel)
-        logging.info(test)
-        logging.info("Testing done!")
+        logging.info("!test begin")
+        logging.info(f"responses: {self.voice_response.responses}")
+        # voice_channel = message.author.voice.channel.id
+        # test = await self.get_voice_messages(voice_channel)
+        # logging.info(test)
+        # logging.info(f"User speaking: {self.voice_response.user_speaking}")
+        # logging.info(f"Bot speaking: {self.voice_response.responding}")
+        # logging.info(f"Audio Buffers: {self.voice_response.audio_buffers}")
+        logging.info("!test end")
         # loop = asyncio.get_event_loop()
         # future = loop.run_in_executor(None, self.speech_processor, 'src/old/audio_benteb3nt_0.wav')
         # text = await future
@@ -194,32 +197,8 @@ class DiscOllama:
             del self.writing_tasks[response.message.id]  # Remove the task from the dictionary
             await self.save_message(response.message, full_response)
        
-       
-    async def talking(self, voiceResponse, filename):
-        full_response = ""
-        try:
-            chat_history = await self.get_voice_messages(voiceResponse.voice_channel.channel.id)
-            
-            async for part in self.chat(chat_history, seconds=5, model=self.model_voice):
-                # print(part['message']['content'], end='', flush=True)
-                part_content = part['message']['content']
-                full_response += part_content
-                await voiceResponse.ai_write(part_content, end='...', filename=filename)
-                    
-            await voiceResponse.ai_write('', filename=filename)
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logging.error("Error talking")
-            logging.error(e)
-            pass
-        finally:
-            # await response.message.remove_reaction('🤔', self.discord.user) # Make sure we remove thinking reaction when done answering
-            # del self.writing_tasks[response.message.id]  # Remove the task from the dictionary
-            await self.save_voice_message(voiceResponse.voice_channel.channel.id, full_response, self.discord.user)
-    
-    
-    async def chat(self, messages, seconds=1, model=None):
+     
+    async def chat(self, messages, milliseconds=1000, model=None):
         if model is None:
             model = self.model
         sb = io.StringIO() # create new StringIO object that can write and read from a string buffer
@@ -230,7 +209,13 @@ class DiscOllama:
                 sb.write(part['message']['content']) # write content to StringIO buffer
                 # print(part['message']['content'], end='', flush=True)
             
-                if part['done'] or datetime.now() - t > timedelta(seconds=seconds):
+                if milliseconds is None:
+                    # If milliseconds is None, yield every time we get a return from the stream
+                    part['message']['content'] = sb.getvalue()
+                    yield part
+                    sb.seek(0, io.SEEK_SET)
+                    sb.truncate()
+                elif part['done'] or datetime.now() - t > timedelta(milliseconds=milliseconds):
                     part['message']['content'] = sb.getvalue()
                     yield part
                     t = datetime.now()
@@ -298,8 +283,15 @@ class DiscOllama:
             "attachments": [attachment.url for attachment in message.attachments] if response is None else [],
         }))
     
+    def save_voice_response(self, channel, text):
+        logging.info(f"Saving voice response in channel {channel}")
+        self.redis.rpush(f"discord:voice:{channel}", json.dumps({
+            "author": self.discord.user.id,
+            "content": text,
+        }))
     
-    async def save_voice_message(self, channel, text, user):
+    def save_voice_message(self, channel, text, user):
+        logging.info(f"Saving voice message from {user.name} in channel {channel}")
         if (user.id == self.discord.user.id):
             content = text
         else:
@@ -357,6 +349,7 @@ class DiscOllama:
         if message.author.voice is None:
             await message.channel.send("You're not connected to a voice channel!")
             return
+        ## TODO: Change so it checks if we are already in a voice channel in the same guild
         if self.discord.voice_clients:
             # vc = await self.discord.voice_clients[0].move_to(voice_channel)
             await message.channel.send("I'm already speaking to someone else. Go away!")
@@ -366,10 +359,11 @@ class DiscOllama:
         vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
         await message.channel.send(f"Joined {voice_channel.name}!")
         
-        voice_response = VoiceResponse(vc, self)
-        def callback(user, data: voice_recv.VoiceData):
-            voice_response.user_speak(user, data.pcm)
-        vc.listen(voice_recv.BasicSink(callback))
+        ## TODO: Add voice response to self.connected_vcs list so we can listen to multiple voice channels in multiple guilds
+        self.voice_response = VoiceResponse(vc, self)
+        # def callback(user, data: voice_recv.VoiceData):
+        #     voice_response.user_speak(user, data)
+        # vc.listen(voice_recv.BasicSink(callback))
                 
                 
     async def leave_vc(self, message):
