@@ -2,11 +2,13 @@ import os
 import io
 import json
 import discord # python3 -m pip install -U "discord.py[voice]"
+from discord import SpeakingState
 from discord.ext import voice_recv # python -m pip install -U discord-ext-voice-recv
 import logging
 import asyncio
 from datetime import datetime, timedelta
-from .Response import Response, VoiceResponse
+from .Response import Response
+from .VoiceChat import VoiceChat
 
 class DiscOllama:
     def __init__(self, model, ollama, discord, redis, speech_processor, tts):
@@ -17,28 +19,22 @@ class DiscOllama:
         self.redis = redis
         self.speech_processor = speech_processor
         self.tts = tts
-        self.vc = None
+        self.voice_chats = []
         
         self.writing_tasks = {}
         
-        try:
-            with open('dm.whitelist', 'r') as f:
-                self.dm_whitelist = json.load(f)
-        except FileNotFoundError:
-            self.dm_whitelist = []
-            
-        try:
-            with open('admin.whitelist', 'r') as f:
-                self.admin_whitelist = json.load(f)
-        except FileNotFoundError:
-            self.admin_whitelist = []
 
         # register event handlers
         self.discord.event(self.on_ready)
         self.discord.event(self.on_message)
         
-        
-        
+    
+    def load_whitelist(self, whitelistPath):
+        try:
+            with open(whitelistPath, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return []
         
     def run(self, token):
         try:
@@ -56,9 +52,7 @@ class DiscOllama:
             discord.utils.oauth_url(
             self.discord.application_id,
             permissions=discord.Permissions(
-                read_messages=True,
-                send_messages=True,
-                create_public_threads=True,
+                administrator=True,
             ),
             scopes=['bot'],
             ),
@@ -71,31 +65,12 @@ class DiscOllama:
         
         # Todo: Create handle_command function that takes in message and calls the appropriate function
         content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
-        
-        if (content.lower().startswith('!test')):
-            await message.add_reaction('👌')
-            asyncio.create_task(self.test(message))
-            return
-        if (content.lower().startswith('!stop')):
-            # User requested to stop their tasks
-            self.stop_authors_tasks(message)
-            return
-        if (content.lower().startswith('!wipe')):
-            # Admin request to wipe chat history
-            await self.wipe_messages(message)
-            return
-        if (content.lower().startswith('!join')):
-            # Admin request to join voice chat
-            await self.join_vc(message)
-            # asyncio.create_task(self.join_vc(message))
-            return
-        if (content.lower().startswith('!leave')):
-            # Admin request to leave voice chat
-            await self.leave_vc(message)
+        commands = ['stop', 'join', 'leave', 'model', 'models', 'wipe', 'test', 'admin', 'dm']
+        if any(content.startswith(f'!{command}') for command in commands):
+            await self.handle_command(message, content)
             return
         
-        
-        # Save every sinbgle message the bot has access to, but not bot commands
+        # Save every single message the bot has access to, but not bot commands
         await self.save_message(message)
         
         passed = await self.check_message_conditions(message)
@@ -108,36 +83,145 @@ class DiscOllama:
         self.writing_tasks[message.id] = (r, writing)
     
     
-    async def test(self, message):
-        logging.info("!test begin")
-        logging.info(f"responses: {self.voice_response.responses}")
-        # voice_channel = message.author.voice.channel.id
-        # test = await self.get_voice_messages(voice_channel)
-        # logging.info(test)
-        # logging.info(f"User speaking: {self.voice_response.user_speaking}")
-        # logging.info(f"Bot speaking: {self.voice_response.responding}")
-        # logging.info(f"Audio Buffers: {self.voice_response.audio_buffers}")
-        logging.info("!test end")
-        # loop = asyncio.get_event_loop()
-        # future = loop.run_in_executor(None, self.speech_processor, 'src/old/audio_benteb3nt_0.wav')
-        # text = await future
-        # logging.info(text['text'])
+    async def handle_command(self, message, content):
+        admin_commands = ['model', 'models', 'wipe', 'admin', 'dm', 'test']
+        dm_commands = ['model', 'models', 'wipe']
+        
+        # If server, check if commander is admin either under guildID in redis or super admin
+        if message.guild is not None:
+            if any(content.startswith(f'!{command}') for command in admin_commands):
+                if (not self.is_admin(message)):
+                    logging.info(f"{message.author.id} tried to use admin command '{content}' in channel '{message.channel.id}' while not being admin...")
+                    await message.add_reaction('🚫')
+                    return
+        
+        # Check if DM
+        if message.guild is None:
+            if any(content.startswith(f'!{command}') for command in dm_commands):
+                dm_allowed = await self.is_user_allowed_dm(message)
+                if dm_allowed:
+                    logging.info(f"{message.author.id} tried to use admin command '{content}' in DM while not being whitelisted to DM...")
+                    return
+            
+        ## User is allowed to trigger both commands as admin in current server and in DMs
+        
+        ## These can be called by anyone
+        if (content.lower().startswith('!stop')):
+            # User requested to stop their tasks
+            self.stop_authors_tasks(message)
+            return True
+        
+        elif (content.lower().startswith('!join')):
+            # Admin request to join voice chat
+            await self.join_vc(message)
+            # asyncio.create_task(self.join_vc(message))
+            return True
+        elif (content.lower().startswith('!leave')):
+            # Admin request to leave voice chat
+            await self.leave_vc(message)
+            return True
+        ## ------------------------------------------------------------------------
+        ## These can be called by admins
+        elif (content.lower().startswith('!models')):
+            await message.add_reaction('🤔')
+            model_list = await self.ollama.list()
+            model_string = ""
+            for model in model_list['models']:
+                model_string += f"{model['name']}\n"
+            
+            await message.remove_reaction('🤔', self.discord.user)
+            
+            ## TODO: Send as Thread? I think not.
+            # msg_thread = await message.channel.create_thread(name='List of available models', message=message, auto_archive_duration=60)
+            # await msg_thread.send(f"**Models:**\n{model_string}")
+            await message.author.send(f"**Models:**\n{model_string}")
+            return True
+        
+        elif (content.lower().startswith('!model')):
+            logging.info(f"channel ID: {message.channel.id}")
+            # Check if second word is 'set' (TODO: Add 'install'/'uninstall' options to models)
+            # If there are no second word, then assume user wants to see current model used in this chat
+            if len(content.split()) > 1:
+                second_word = content.split()[1].lower()
+                if second_word == "set":
+                    if len(content.split()) > 2:
+                        model_string = content.split()[2]
+                        model_list = await self.ollama.list()
+                        available_models = []
+                        for model in model_list['models']:
+                            available_models.append(f"{model['name']}")
+                        if model_string in available_models:
+                            await self.set_current_model(message.channel.id, model_string)
+                            await message.add_reaction('👌')
+                        else:
+                            logging.info(f"{model_string} is not an available model.")
+                            await message.add_reaction('💩')
+                    else:
+                        await message.reply(f"**Missing Model:**")
+                                                                                                                                            
+                                                                                                                        
+            else:
+                current_model = await self.get_current_model(message.channel.id)
+                await message.reply(f"**Current model:** {current_model}")
+            
+            return True
+        
+        elif (content.lower().startswith('!wipe')):
+            await self.wipe_messages(message)
+            return True
+                
+        elif (content.lower().startswith('!admin')):
+            if len(content.split()) > 1:
+                second_word = content.split()[1].lower()
+                if second_word == "add":
+                    await self.add_admin(message)
+                if second_word == "remove":
+                    await self.remove_admin(message)
+                
+        elif (content.lower().startswith('!dm')):
+            # The first word is "!admin" check if the second word is "add" or "remove"
+            if len(content.split()) > 1:
+                second_word = content.split()[1].lower()
+                if second_word == "add":
+                    await self.add_user_to_dm(message)
+                if second_word == "remove":
+                    await self.remove_user_from_dm(message)
+        
+        elif (content.lower().startswith('!test')):
+            await message.add_reaction('👌')
+            # asyncio.create_task(self.test(message))
+            await self.test(message)
+            return True
+        
+        return False
+        
+    
     
     async def check_message_conditions(self, message):
-        if message.guild is not None and (os.getenv("DISCORD_SERVER") and int(message.guild.id) != int(os.getenv("DISCORD_SERVER"))):
-            # Dont respond in other servers than the one specified in .env
-            try:
-                await message.channel.send(f"I only serve my master!")
-            except Exception as e:
-                logging.error("Error sending message")
-                logging.error(e)
-            finally:
-                return False
+        allowed_server_ids = os.getenv("DISCORD_SERVER")
+        if message.guild is not None and allowed_server_ids:
+            allowed_server_ids = [int(server_id.strip()) for server_id in allowed_server_ids.split(",")]
+            if int(message.guild.id) not in allowed_server_ids:
+                # Dont respond in other servers than the one specified in .env
+                try:
+                    await message.channel.send(f"I only serve my masters in another channel!")
+                except Exception as e:
+                    logging.error("Error sending message")
+                    logging.error(e)
+                finally:
+                    return False
         
-        if message.author.id not in self.dm_whitelist:
+        dm_allowed = self.is_user_allowed_dm(message)
+        if not dm_allowed:
             # Don't respond to DMs from non-whitelisted users
-            logging.info(f"Ignoring DM from non-whitelisted user {message.author.id} != {self.dm_whitelist}")
-            await message.author.send("Who do you think you are?")
+            logging.info(f"Ignoring DM from non-whitelisted user {message.author.id}")
+            await message.add_reaction('🙅‍♂️')
+            messages = await self.get_messages(message)
+            messages.append({"role": "system", "content": f"Generate an answer where you refuse you to respond to the user who has the name '{message.author.name}'. You are encouraged to be a little mean to {message.author.name} in you response. You have access to past messages from this user if there is a history, you can choose to use this history to get your point across further. {message.author.name}'s original message to you is: {message.content}"})
+            current_model = await self.get_current_model(message.channel.id)
+            response = await self.ollama.chat("openchat:7b-v3.5-1210-q5_K_M", messages=messages, stream=False)
+            await message.author.send(response['message']['content'])
+            await self.save_message(message, response['message']['content'])
             return False
         
         
@@ -152,6 +236,24 @@ class DiscOllama:
         
         return True
 
+    async def test(self, message):
+        logging.info("!test begin")
+        
+        is_admin = self.is_admin_in_channel(message.guild.id, message.author.id)
+        logging.info(f"IS ADMIN IN CHANNEL: {is_admin}")
+        # self.voice_chats[0].test()
+        # self.voice_chat.test()
+        # voice_channel = message.author.voice.channel.id
+        # test = await self.get_voice_messages(voice_channel)
+        # logging.info(test)
+        # logging.info(f"User speaking: {self.voice_response.user_speaking}")
+        # logging.info(f"Bot speaking: {self.voice_response.responding}")
+        # logging.info(f"Audio Buffers: {self.voice_response.audio_buffers}")
+        logging.info("!test end")
+        # loop = asyncio.get_event_loop()
+        # future = loop.run_in_executor(None, self.speech_processor, 'src/old/audio_benteb3nt_0.wav')
+        # text = await future
+        # logging.info(text['text'])
         
     async def thinking(self, message, timeout=999):
         try:
@@ -173,9 +275,10 @@ class DiscOllama:
         full_response = ""
         try:
             thinking = asyncio.create_task(self.thinking(response.message))
-            chat_history = await self.get_messages(response.message)
+            messages = await self.get_messages(response.message)
+            current_model = await self.get_current_model(response.message.channel.id)
             
-            async for part in self.chat(chat_history):
+            async for part in self.chat(messages, current_model):
                 if thinking is not None and not thinking.done():
                     thinking.cancel()
                 # print(part['message']['content'], end='', flush=True)
@@ -193,12 +296,11 @@ class DiscOllama:
         finally:
             if thinking is not None and not thinking.done():
                 thinking.cancel()
-            await response.message.remove_reaction('🤔', self.discord.user) # Make sure we remove thinking reaction when done answering
             del self.writing_tasks[response.message.id]  # Remove the task from the dictionary
             await self.save_message(response.message, full_response)
        
      
-    async def chat(self, messages, milliseconds=1000, model=None):
+    async def chat(self, messages, model=None, milliseconds=1000):
         if model is None:
             model = self.model
         sb = io.StringIO() # create new StringIO object that can write and read from a string buffer
@@ -226,11 +328,13 @@ class DiscOllama:
             logging.error("Error getting AI chat response")
             logging.error(e)
         
-    async def generate(self, content):
+    async def generate(self, content, model=None):
+        if model is None:
+            model = self.model
         sb = io.StringIO()
         t = datetime.now()
         try:
-            generator = await self.ollama.generate(model=self.model, prompt=content, keep_alive=-1, stream=True)
+            generator = await self.ollama.generate(model=model, prompt=content, keep_alive=-1, stream=True)
             async for part in generator:
                 sb.write(part['response'])
 
@@ -247,28 +351,25 @@ class DiscOllama:
 
 
     async def get_messages(self, message):
-        if message.guild is None:
-            # Retrieve from user's id
-            messages = self.redis.lrange(f"discord:user:{message.author.id}", 0, -1)
-        else:
-            # Retrieve from channel's id
-            messages = self.redis.lrange(f"discord:channel:{message.channel.id}", 0, -1)
-
+        if not self.redis:
+            return [{"role": "assistant" if message.author.id == self.discord.user.id else "user", "content": message.content}]
+        
+        messages = self.redis.lrange(f"messages:{message.channel.id}", 0, -1)
         # Convert the messages from JSON format to Python dictionaries
         messages = [json.loads(msg) for msg in messages]
-
-        messages = [{
-                "role": "assistant" if msg["author"] == self.discord.user.id else "user",
-                "content": msg["content"],}
+        messages = [
+                {"role": "assistant" if msg["author"] == self.discord.user.id else "user","content": msg["content"]}
             for msg in messages.copy()
         ]
         return messages
 
     async def save_message(self, message, response:str=None):
+        if not self.redis:
+            return False
         # Take the message and save it under either user's id or channel's id
-        redis_path = f"discord:channel:{message.channel.id}"
-        if message.guild is None: # Save under user's id
-            redis_path = f"discord:user:{message.author.id}"
+        redis_path = f"messages:{message.channel.id}"
+        # if message.guild is None: # Save under user's id
+        #     redis_path = f"messages:{message.author.id}"
         
         content = message.content
         if response is not None:
@@ -283,14 +384,23 @@ class DiscOllama:
             "attachments": [attachment.url for attachment in message.attachments] if response is None else [],
         }))
     
+    async def get_chat_model(self, message):
+        logging.info(f"Getting the model for chat {message.channel.id}")
+        
+    # Save voice messages as text for bot
     def save_voice_response(self, channel, text):
+        if not self.redis:
+            return False
         logging.info(f"Saving voice response in channel {channel}")
         self.redis.rpush(f"discord:voice:{channel}", json.dumps({
             "author": self.discord.user.id,
             "content": text,
         }))
     
+    ## Save voice messages as text for users
     def save_voice_message(self, channel, text, user):
+        if not self.redis:
+            return False
         logging.info(f"Saving voice message from {user.name} in channel {channel}")
         if (user.id == self.discord.user.id):
             content = text
@@ -304,6 +414,10 @@ class DiscOllama:
 
 
     async def get_voice_messages(self, channel):
+        if not self.redis:
+            # return [{"role": "assistant" if message.author.id == self.discord.user.id else "user", "content": message.content}]
+            return []
+        
         messages = self.redis.lrange(f"discord:voice:{channel}", 0, -1)
 
         # Convert the messages from JSON format to Python dictionaries
@@ -317,23 +431,15 @@ class DiscOllama:
         return messages
 
     async def wipe_messages(self, message):
-        if message.guild is None: # DM
-            if message.author.id in self.dm_whitelist: # Whitelisted user
-                logging.info(f"Wiping direct message history for {message.author.id} {message.author.name}")
-                redis_path = f"discord:user:{message.author.id}"
-                self.redis.delete(redis_path)
-                await message.add_reaction('👌')
-                return True
-        elif message.author.id in self.admin_whitelist: # Channel admin
-            logging.info(f"Wiping message history in ({message.guild.id}) {message.guild.name} ({message.channel.id}) {message.channel.name}. Requested by {message.author.id} {message.author.name}")
-            redis_path = f"discord:channel:{message.channel.id}"
-            self.redis.delete(redis_path)
-            await message.add_reaction('👌')
-            return True
+        if not self.redis:
+            return False
+        
+        logging.info(f"Wiping message history in {message.channel.id}. Requested by {message.author.id} {message.author.name}")
+        redis_path = f"messages:{message.channel.id}"
+        self.redis.delete(redis_path)
+        await message.add_reaction('👌')
+        return True
             
-        # User not allowed to wipe, react accordingly.
-        await message.add_reaction('🖕')
-        return False
         
     async def stop_authors_tasks(self, message):
         for message_id, (response, answer_task) in self.writing_tasks.items():
@@ -359,12 +465,14 @@ class DiscOllama:
         vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
         await message.channel.send(f"Joined {voice_channel.name}!")
         
+        chat = VoiceChat(vc, self.discord)
+        self.voice_chats.append(chat)
+        self.voice_chat = chat
         ## TODO: Add voice response to self.connected_vcs list so we can listen to multiple voice channels in multiple guilds
-        self.voice_response = VoiceResponse(vc, self)
+        # self.voice_response = VoiceResponse(vc, self)
         # def callback(user, data: voice_recv.VoiceData):
         #     voice_response.user_speak(user, data)
         # vc.listen(voice_recv.BasicSink(callback))
-                
                 
     async def leave_vc(self, message):
         logging.info(f"Leaving Voicechat with user {message.author.name}")
@@ -383,4 +491,121 @@ class DiscOllama:
             else:
                 await message.channel.send("We're not in the same voice channel!")
                 
+    # Check if either super admin or local guild admin
+    def is_admin(self, message):
+        super_admins = os.getenv("SUPER_ADMIN")
+        if super_admins:
+            super_admins = [int(id.strip()) for id in super_admins.split(",")]
+        if (message.author.id in super_admins):
+            return True
+        
+        # author is not a super admin, check if they are admin in guild
+        if self.is_admin_in_channel(message.guild.id, message.author.id):
+            return True
+        
+        return False
+    
+    def is_admin_in_channel(self, guildID, userID):
+        if not self.redis:
+            return False
+
+        if self.redis.sismember(f"admins:{guildID}", str(userID)):
+            return True
+        else:
+            return False
+        
+        
+    async def add_admin(self, message):
+        if not self.redis:
+            await message.add_reaction('💩')
+            return
+        
+        mentions = message.mentions
+        users_to_add = [member for member in mentions if member.id != self.discord.user.id]
+        
+        if (len(users_to_add) > 0):
+            for member in users_to_add:
+                logging.info(f"adding {member.id} to admins:{message.guild.id}")
+                self.redis.sadd(f"admins:{message.guild.id}", member.id)
+        
+        await message.add_reaction('👌')
                 
+    async def remove_admin(self, message):
+        if not self.redis:
+            await message.add_reaction('💩')
+            return
+        
+        mentions = message.mentions
+        users_to_remove = [member for member in mentions if member.id != self.discord.user.id]
+
+        if len(users_to_remove) > 0:
+            for member in users_to_remove:
+                admin_set_name = f"admins:{message.guild.id}"
+                if self.redis.sismember(admin_set_name, str(member.id)):
+                    logging.info(f"Removing {member.id} from {admin_set_name}")
+                    self.redis.srem(admin_set_name, member.id)
+                else:
+                    logging.info(f"{member.id} is not an admin in {admin_set_name}")
+                    
+        await message.add_reaction('👌')
+        
+    async def add_user_to_dm(self, message):
+        if not self.redis:
+            await message.add_reaction('💩')
+            return
+        
+        mentions = message.mentions
+        users_to_add = [member for member in mentions if member.id != self.discord.user.id]
+        
+        if (len(users_to_add) > 0):
+            for member in users_to_add:
+                logging.info(f"adding {member.id} to dm_whitelist")
+                self.redis.sadd(f"dm_whitelist", member.id)
+        
+        await message.add_reaction('👌')
+        
+    async def remove_user_from_dm(self, message):
+        if not self.redis:
+            await message.add_reaction('💩')
+            return
+        
+        mentions = message.mentions
+        users_to_remove = [member for member in mentions if member.id != self.discord.user.id]
+
+        if len(users_to_remove) > 0:
+            for member in users_to_remove:
+                if self.redis.sismember("dm_whitelist", str(member.id)):
+                    logging.info(f"Removing {member.id} from dm_whitelist")
+                    self.redis.srem("dm_whitelist", member.id)
+                else:
+                    logging.info(f"{member.id} is not in dm_whitelist")
+                    
+        await message.add_reaction('👌')
+        
+    async def is_user_allowed_dm(self, message):
+        super_admins = os.getenv("SUPER_ADMIN")
+        if super_admins:
+            super_admins = [int(id.strip()) for id in super_admins.split(",")]
+        if (message.author.id in super_admins):
+            return True
+        
+        if not self.redis:
+            return False
+
+        if self.redis.sismember("dm_whitelist", str(message.author.id)):
+            return True
+        else:
+            return False
+        
+    async def get_current_model(self, channelID):
+        if not self.redis:
+            return self.model
+        
+        model_string = self.redis.get(f"model:{channelID}")
+        return model_string if model_string else self.model
+    
+    async def set_current_model(self, channelID, model_string):
+        if not self.redis:
+            return
+        
+        self.redis.set(f"model:{channelID}", model_string)

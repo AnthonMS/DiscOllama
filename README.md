@@ -5,6 +5,8 @@ DiscOllama is a Discord bot that uses Ollama as the backend LLM provider. It's d
 ## Features
 
 - Ollama LLM server integration: The bot uses Ollama to process and generate responses based on user input and past interactions.
+- Nginx for secure reverse proxy to Ollama
+
 
 ## Developer's Notes
 
@@ -14,7 +16,7 @@ So to learn the API and start some kind of project, learning to create a discord
 
 Later edit: I have stumpled upon the official discollama discord bot used in the Ollama discord server. This is a very good starting point, so I will be borrowing the code to expand on it instead of reinventing the wheel.
 
-## Getting Started (No requirements.txt yet. This is going to change a lot in the next couple of days.)
+## Getting Started (No requirements.txt yet. This is going to change a lot.)
 
 1. Clone the repository.
 2. Install the required Python packages by running `pip install -r requirements.txt`.
