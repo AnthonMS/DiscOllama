@@ -23,6 +23,8 @@ class DiscOllama:
         
         self.writing_tasks = {}
         
+        self.pull_tasks = {}
+        
 
         # register event handlers
         self.discord.event(self.on_ready)
@@ -67,7 +69,7 @@ class DiscOllama:
         content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
         commands = ['stop', 'join', 'leave', 'model', 'models', 'wipe', 'test', 'admin', 'dm']
         if any(content.startswith(f'!{command}') for command in commands):
-            await self.handle_command(message, content)
+            await self.handle_command(message)
             return
         
         # Save every single message the bot has access to, but not bot commands
@@ -83,9 +85,10 @@ class DiscOllama:
         self.writing_tasks[message.id] = (r, writing)
     
     
-    async def handle_command(self, message, content):
+    async def handle_command(self, message):
         admin_commands = ['model', 'models', 'wipe', 'admin', 'dm', 'test']
         dm_commands = ['model', 'models', 'wipe']
+        content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
         
         # If server, check if commander is admin either under guildID in redis or super admin
         if message.guild is not None:
@@ -95,107 +98,39 @@ class DiscOllama:
                     await message.add_reaction('🚫')
                     return
         
-        # Check if DM
+        # if DM, check that commander is whitelisted in redis or is super admin
         if message.guild is None:
             if any(content.startswith(f'!{command}') for command in dm_commands):
                 dm_allowed = await self.is_user_allowed_dm(message)
-                if dm_allowed:
+                if not dm_allowed:
                     logging.info(f"{message.author.id} tried to use admin command '{content}' in DM while not being whitelisted to DM...")
                     return
             
-        ## User is allowed to trigger both commands as admin in current server and in DMs
-        
         ## These can be called by anyone
         if (content.lower().startswith('!stop')):
-            # User requested to stop their tasks
-            self.stop_authors_tasks(message)
-            return True
-        
+            await self.handle_command_stop(message)
         elif (content.lower().startswith('!join')):
-            # Admin request to join voice chat
-            await self.join_vc(message)
-            # asyncio.create_task(self.join_vc(message))
-            return True
+            await self.handle_command_join(message)
         elif (content.lower().startswith('!leave')):
-            # Admin request to leave voice chat
-            await self.leave_vc(message)
-            return True
-        ## ------------------------------------------------------------------------
+            await self.handle_command_leave(message)
+            
         ## These can be called by admins
         elif (content.lower().startswith('!models')):
-            await message.add_reaction('🤔')
-            model_list = await self.ollama.list()
-            model_string = ""
-            for model in model_list['models']:
-                model_string += f"{model['name']}\n"
-            
-            await message.remove_reaction('🤔', self.discord.user)
-            
-            ## TODO: Send as Thread? I think not.
-            # msg_thread = await message.channel.create_thread(name='List of available models', message=message, auto_archive_duration=60)
-            # await msg_thread.send(f"**Models:**\n{model_string}")
-            await message.author.send(f"**Models:**\n{model_string}")
-            return True
-        
+            await self.handle_command_models(message)
         elif (content.lower().startswith('!model')):
-            logging.info(f"channel ID: {message.channel.id}")
-            # Check if second word is 'set' (TODO: Add 'install'/'uninstall' options to models)
-            # If there are no second word, then assume user wants to see current model used in this chat
-            if len(content.split()) > 1:
-                second_word = content.split()[1].lower()
-                if second_word == "set":
-                    if len(content.split()) > 2:
-                        model_string = content.split()[2]
-                        model_list = await self.ollama.list()
-                        available_models = []
-                        for model in model_list['models']:
-                            available_models.append(f"{model['name']}")
-                        if model_string in available_models:
-                            await self.set_current_model(message.channel.id, model_string)
-                            await message.add_reaction('👌')
-                        else:
-                            logging.info(f"{model_string} is not an available model.")
-                            await message.add_reaction('💩')
-                    else:
-                        await message.reply(f"**Missing Model:**")
-                                                                                                                                            
-                                                                                                                        
-            else:
-                current_model = await self.get_current_model(message.channel.id)
-                await message.reply(f"**Current model:** {current_model}")
-            
-            return True
-        
+            await self.handle_command_model(message)        
         elif (content.lower().startswith('!wipe')):
-            await self.wipe_messages(message)
-            return True
-                
+            await self.handle_command_wipe(message)                
         elif (content.lower().startswith('!admin')):
-            if len(content.split()) > 1:
-                second_word = content.split()[1].lower()
-                if second_word == "add":
-                    await self.add_admin(message)
-                if second_word == "remove":
-                    await self.remove_admin(message)
-                
+            await self.handle_command_admin(message)                
         elif (content.lower().startswith('!dm')):
-            # The first word is "!admin" check if the second word is "add" or "remove"
-            if len(content.split()) > 1:
-                second_word = content.split()[1].lower()
-                if second_word == "add":
-                    await self.add_user_to_dm(message)
-                if second_word == "remove":
-                    await self.remove_user_from_dm(message)
-        
+            await self.handle_command_dm(message)    
         elif (content.lower().startswith('!test')):
             await message.add_reaction('👌')
             # asyncio.create_task(self.test(message))
             await self.test(message)
-            return True
         
-        return False
         
-    
     
     async def check_message_conditions(self, message):
         allowed_server_ids = os.getenv("DISCORD_SERVER")
@@ -211,7 +146,7 @@ class DiscOllama:
                 finally:
                     return False
         
-        dm_allowed = self.is_user_allowed_dm(message)
+        dm_allowed = await self.is_user_allowed_dm(message)
         if not dm_allowed:
             # Don't respond to DMs from non-whitelisted users
             logging.info(f"Ignoring DM from non-whitelisted user {message.author.id}")
@@ -366,10 +301,6 @@ class DiscOllama:
     async def save_message(self, message, response:str=None):
         if not self.redis:
             return False
-        # Take the message and save it under either user's id or channel's id
-        redis_path = f"messages:{message.channel.id}"
-        # if message.guild is None: # Save under user's id
-        #     redis_path = f"messages:{message.author.id}"
         
         content = message.content
         if response is not None:
@@ -377,7 +308,7 @@ class DiscOllama:
         else:
             content = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + ' ' + content + "\n\nSent by: " + str(message.author.name)
             # content = content + "\nTimestamp: " + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        self.redis.rpush(redis_path, json.dumps({
+        self.redis.rpush(f"messages:{message.channel.id}", json.dumps({
             "author": message.author.id if response is None else self.discord.user.id,
             "content": content,
             "id": message.id,
@@ -514,7 +445,144 @@ class DiscOllama:
         else:
             return False
         
+
+    ### ---------- Command Functions ----------
+    async def handle_command_stop(self,message):
+        # User requested to stop their tasks
+        self.stop_authors_tasks(message)
+            
+    async def handle_command_join(self,message):
+        # Admin request to join voice chat
+        await self.join_vc(message)
+        # asyncio.create_task(self.join_vc(message))
+            
+    async def handle_command_leave(self,message):
+        # Admin request to leave voice chat
+        await self.leave_vc(message)
+            
+    async def handle_command_models(self,message):
+        await message.add_reaction('🤔')
+        model_list = await self.ollama.list()
+        model_string = ""
+        for model in model_list['models']:
+            model_string += f"{model['name']}\n"
         
+        await message.remove_reaction('🤔', self.discord.user)
+        
+        ## TODO: Send as Thread? I think not.
+        # msg_thread = await message.channel.create_thread(name='List of available models', message=message, auto_archive_duration=60)
+        # await msg_thread.send(f"**Models:**\n{model_string}")
+        await message.author.send(f"**Models:**\n{model_string}")
+        
+    async def handle_command_model(self,message):
+        content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
+        # If there are no second word, then assume user wants to see current model used in this chat
+        if len(content.split()) > 1:
+            second_word = content.split()[1].lower()
+            if second_word == "set":
+                await self.handle_set_model(message)
+            elif second_word == "pull":
+                pull_task = asyncio.create_task(self.handle_pull_model(message))
+                self.pull_tasks[message.id] = pull_task
+                # await self.handle_pull_model(message)
+            elif second_word == "delete":
+                await self.handle_delete_model(message)
+            elif second_word == "create":
+                await self.handle_create_model(message)
+                                                                                                                                        
+                                                                                                                    
+        else:
+            current_model = await self.get_current_model(message.channel.id)
+            await message.reply(f"**Current model:** {current_model}")
+            
+    async def handle_command_wipe(self,message):
+        await self.wipe_messages(message)
+            
+    async def handle_command_admin(self,message):
+        content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
+        if len(content.split()) > 1:
+            second_word = content.split()[1].lower()
+            if second_word == "add":
+                await self.add_admin(message)
+            if second_word == "remove":
+                await self.remove_admin(message)
+                
+    async def handle_command_dm(self,message):
+        content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
+        # The first word is "!admin" check if the second word is "add" or "remove"
+        if len(content.split()) > 1:
+            second_word = content.split()[1].lower()
+            if second_word == "add":
+                await self.add_user_to_dm(message)
+            if second_word == "remove":
+                await self.remove_user_from_dm(message)
+
+        
+    async def handle_set_model(self, message):
+        content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
+        
+        if len(content.split()) > 2:
+            model_string = content.split()[2]
+            model_list = await self.ollama.list()
+            available_models = []
+            for model in model_list['models']:
+                available_models.append(f"{model['name']}")
+            if model_string in available_models:
+                await self.set_current_model(message.channel.id, model_string)
+                await message.add_reaction('👌')
+            else:
+                logging.info(f"{model_string} is not an available model.")
+                await message.add_reaction('💩')
+        else:
+            await message.reply(f"**Missing Model...**")
+    
+    async def handle_pull_model(self,message):
+        try:
+            content = message.content.replace(f'<@{self.discord.user.id}>', '').strip()
+            if len(content.split()) > 2:
+                model_string = content.split()[2]
+                logging.info(f"Pulling model {model_string}!")
+                await message.add_reaction('🤔')  # Add a reaction to indicate loading
+                progress_message = await message.reply("Status: ...")
+                
+                current_digest = ''
+                generator = await self.ollama.pull(model_string, stream=True)
+                async for progress in generator:
+                    digest = progress.get('digest', '')
+                    if digest != current_digest:
+                        # progress_bar += '.'
+                        current_digest = digest
+                    if not digest:
+                        status = progress.get('status')
+                        if status:
+                            await progress_message.edit(content=f"Status: {status}")
+                            logging.info(f"PULL STATUS: {status}")
+                        continue
+            
+            
+                # test = await self.ollama.pull(model_string)
+                logging.info(f"Pulling model {model_string} complete!")
+                await message.remove_reaction('🤔', self.discord.user)
+                # await message.add_reaction('✅')
+                # await progress_message.delete()
+            else:
+                await message.reply(f"**Missing Model...**")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logging.error("Error pulling model...")
+            logging.error(e)
+            pass
+        finally:
+            del self.pull_tasks[message.id]  # Remove the task from the dictionary
+        
+        
+        
+    async def handle_delete_model(self,message):
+        pass
+    async def handle_create_model(self,message):
+        pass
+                
     async def add_admin(self, message):
         if not self.redis:
             await message.add_reaction('💩')
