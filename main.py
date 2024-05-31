@@ -28,7 +28,7 @@ if __name__ == '__main__':
     # )
     # speech_model.to(speech_device)
     # speech_processor = AutoProcessor.from_pretrained(speech_model_id)
-    speech_processor = pipeline('automatic-speech-recognition', model='openai/whisper-medium')
+    asr = pipeline('automatic-speech-recognition', model='openai/whisper-medium')
     tts = pyttsx3.init()
     # text = speech_processor('audio/audio_benteb3nt_0.wav')
     # logging.info(text['text'])
@@ -63,6 +63,6 @@ if __name__ == '__main__':
         llama,
         disc,
         redis_client,
-        speech_processor,
+        asr,
         tts
     ).run(os.getenv("DISCORD_TOKEN"))

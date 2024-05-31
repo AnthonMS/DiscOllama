@@ -12,13 +12,13 @@ from .VoiceChat import VoiceChat
 from .misc import *
 
 class DiscOllama:
-    def __init__(self, model, ollama, discord, redis, speech_processor, tts):
+    def __init__(self, model, ollama, discord, redis, asr, tts):
         self.model = model
         self.model_voice = "openhermes-voice:latest"
         self.ollama = ollama
         self.discord = discord
         self.redis = redis
-        self.speech_processor = speech_processor
+        self.asr = asr
         self.tts = tts
         self.voice_chats = []
         
@@ -169,10 +169,9 @@ class DiscOllama:
     async def test(self, message):
         logging.info("!test begin")
         
-        is_admin = self.is_channel_admin(message.guild.id, message.author.id)
-        logging.info(f"IS ADMIN IN CHANNEL: {is_admin}")
-        # self.voice_chats[0].test()
-        # self.voice_chat.test()
+        # is_admin = self.is_channel_admin(message.guild.id, message.author.id)
+        # logging.info(f"IS ADMIN IN CHANNEL: {is_admin}")
+        await self.voice_chats[0].test()
         # voice_channel = message.author.voice.channel.id
         # test = await self.get_voice_messages(voice_channel)
         # logging.info(test)
@@ -181,7 +180,7 @@ class DiscOllama:
         # logging.info(f"Audio Buffers: {self.voice_response.audio_buffers}")
         logging.info("!test end")
         # loop = asyncio.get_event_loop()
-        # future = loop.run_in_executor(None, self.speech_processor, 'src/old/audio_benteb3nt_0.wav')
+        # future = loop.run_in_executor(None, self.asr, 'src/old/audio_benteb3nt_0.wav')
         # text = await future
         # logging.info(text['text'])
         
@@ -517,7 +516,7 @@ class DiscOllama:
             await react_thinking(message, self.discord.user)
             
     async def handle_create_model(self,message):
-        pass
+        await message.reply(f"**Not implemented yet...**")
     
     
     async def stop_authors_tasks(self, message):
@@ -661,9 +660,8 @@ class DiscOllama:
         vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
         await message.channel.send(f"Joined {voice_channel.name}!")
         
-        chat = VoiceChat(vc, self.discord)
+        chat = VoiceChat(vc, self)
         self.voice_chats.append(chat)
-        self.voice_chat = chat
         ## TODO: Add voice response to self.connected_vcs list so we can listen to multiple voice channels in multiple guilds
         # self.voice_response = VoiceResponse(vc, self)
         # def callback(user, data: voice_recv.VoiceData):
@@ -680,6 +678,8 @@ class DiscOllama:
             return
         
         voice_channel = message.author.voice.channel
+        # TODO: Change to use self.voice_chats
+        # Also: Change so it loops through self.voice_chats and checks voice_chat[i].vc.channel == voice_channel
         if self.discord.voice_clients:
             if self.discord.voice_clients[0].channel == voice_channel:
                 await self.discord.voice_clients[0].disconnect()
