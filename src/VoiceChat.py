@@ -44,6 +44,15 @@ class VoiceChat:
         
         self.vc.listen(voice_recv.BasicSink(self.listen))
         
+    async def responding(self):
+        while True:
+            if self.active_transcriptions == 0 and self.new_messages:
+                if datetime.now() - self.last_active > timedelta(seconds=1):
+                    self.new_messages = False
+                    logging.info("RESPONDING....")
+                    self.on_silence() # Call the function when all transcriptions are done and channel is silent for 1 second
+            await asyncio.sleep(1)
+            
     def listen(self, user, data: voice_recv.VoiceData):
         if user is None:
             return
@@ -172,14 +181,6 @@ class VoiceChat:
                 # thread.start()
                 # thread.daemon = True
     
-    async def responding(self):
-        while True:
-            if self.active_transcriptions == 0 and self.new_messages:
-                if datetime.now() - self.last_active > timedelta(seconds=1):
-                    self.new_messages = False
-                    logging.info("RESPONDING....")
-                    self.on_silence() # Call the function when all transcriptions are done and channel is silent for 1 second
-            await asyncio.sleep(1)
     
     async def respond(self, messages=[]):
         try:
