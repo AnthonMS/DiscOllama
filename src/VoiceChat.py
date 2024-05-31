@@ -84,14 +84,17 @@ class VoiceChat:
                 
                 filename = f"audio/{user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.wav"
                 self.user_audio[user.id]['text'].append(filename) # Fill spot with filename so we can put the text in this position later
-                self.save_to_wav(filename, new_audio_data, channels=1, framerate=16000)
-                # self.user_audio[user.id]['processed_audio'].extend(new_audio_data)
-                # self.user_audio[user.id]['started_speaking'] = None
+                self.save_to_wav(filename, new_audio_data, channels=1, framerate=16000) # This is just while testing.
+                self.user_audio[user.id]['processed_audio'].extend(new_audio_data)
+                self.user_audio[user.id]['started_speaking'] = None
                 
-                # loop_handler.run_coroutine(self.transcribe_user_audio(new_audio_data, filename, user.id))
-                # self.transcribe_user_audio(new_audio_data, filename, user.id)
+                ## Maybe instead of trying to start a transcription task or do it from here. We add it to a queue and then have another task checking for queued audio_data?
+                # loop_handler.run_coroutine(self.transcribe_user_audio(new_audio_data, filename, user.id)) # This runs it as a loop. I just need to run it once. AI Made it lol.
+                # self.transcribe_user_audio(new_audio_data, filename, user.id) # This blocks it from listening until it's done transcribing
+                
+                # # self.test_task = asyncio.create_task(self.transcribe_user_audio(new_audio_data, filename, user.id)) ## Error: No running event loop
             
-    def transcribe_user_audio(self, audio_data, filename, user_id):
+    async def transcribe_user_audio(self, audio_data, filename, user_id):
         self.active_transcriptions += 1
         textResult = None
         try:
@@ -115,8 +118,8 @@ class VoiceChat:
             if (textResult == None):
                 return
 
-            self.user_audio[user_id]['processed_audio'].extend(audio_data)
-            self.user_audio[user_id]['started_speaking'] = None
+            # self.user_audio[user_id]['processed_audio'].extend(audio_data)
+            # self.user_audio[user_id]['started_speaking'] = None
             self.new_messages = True
             logging.info(f"Result: {textResult}, Time taken: {elapsed_time.total_seconds():.2f} seconds")
             # Replace filename string with text result
