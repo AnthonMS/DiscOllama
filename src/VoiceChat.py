@@ -16,11 +16,6 @@ from discord.ext import voice_recv
 from .misc import *
 
 
-
-
-loop_handler = AsyncLoopThread()
-
-
 ## This will listen to user audio in connected voice channel and save it to a file when user stops speaking for 2 seconds
 class VoiceChat:
     def __init__(self, voice_client, discOllama) -> None:
@@ -43,50 +38,13 @@ class VoiceChat:
         self.respond_task = asyncio.create_task(self.responding())
         self.ollama_task = None
         
-    async def transcribing(self):
-        while True:
-            # Check if there are audio to transcribe and under which user
-            # In listen, add new variable that will keep track of users who have audio that can be transcribed
-            if len(self.transcribe_users) > 0:
-                self.active_transcriptions += 1
-                for i, user_id in enumerate(self.transcribe_users.copy()):
-                    # self.user_audio[user_id]
-                    # Loop through self.user_audio[user_id]['text] and find the one that are bytearray instead of string and call transcribe audo on that bytearray and switch it out with the result
-                    for i, item in enumerate(self.user_audio[user_id]['text']):
-                        if isinstance(item, bytearray):
-                            transcribed_text = await self.transcribe_audio(item)
-                            logging.info(f"Transcribed text: {transcribed_text}")
-                            if transcribed_text is not None:
-                                self.user_audio[user_id]['text'][i] = transcribed_text
-                                self.new_messages = True
-                            else:
-                                self.user_audio[user_id]['text'][i] = "!ERROR!"
-                            # self.user_audio[user_id]['text'][i] = await self.asr.transcribe_audio(item)
-
-                    self.transcribe_users.remove(user_id)
-                self.active_transcriptions -= 1
-            else:
-                await asyncio.sleep(1)
-            
-    async def responding(self):
-        while True:
-            if self.active_transcriptions == 0 and self.new_messages:
-                if datetime.now() - self.last_active > timedelta(seconds=1):
-                    self.new_messages = False
-                    logging.info("RESPONDING....")
-                    self.on_silence() # Call the function when all transcriptions are done and channel is silent for 1 second
-            await asyncio.sleep(1)
-            
     def listen(self, user, data: voice_recv.VoiceData):
         if user is None:
             return
         
         if self.ollama_task is not None:
-            logging.info("Cancelling ollama task")
             self.ollama_task.cancel()
-            # loop_handler.cancel_task(self.ollama_task)
             
-        # loop_handler.stop_loop()
         self.last_active = datetime.now()
         
         audio_data = self.convert_audio_data(data.pcm)
@@ -123,73 +81,48 @@ class VoiceChat:
                 self.save_to_wav(filename, new_audio_data, channels=1, framerate=16000) # This is just while testing.
                 if user.id not in self.transcribe_users: # Add user_id to list so it can be processed
                     self.transcribe_users.append(user.id)
-                self.user_audio[user.id]['text'].append(new_audio_data) # Fill spot with audio bytearray so we can transcribe it and switch it out with text
+                self.user_audio[user.id]['text'].append(new_audio_data) # Fill spot with audio bytearray so we can transcribe it and switch it out with text later
                 # self.user_audio[user.id]['text'].append(filename) # Fill spot with filename so we can put the text in this position later
                 self.user_audio[user.id]['processed_audio'].extend(new_audio_data)
                 self.user_audio[user.id]['started_speaking'] = None
                 
-                ## Maybe instead of trying to start a transcription task or do it from here. We add it to a queue and then have another task checking for queued audio_data?
-                # loop_handler.run_coroutine(self.transcribe_user_audio(new_audio_data, filename, user.id)) # This runs it as a loop. I just need to run it once. AI Made it lol.
-                # self.transcribe_user_audio(new_audio_data, filename, user.id) # This blocks it from listening until it's done transcribing
-                
-                # # self.test_task = asyncio.create_task(self.transcribe_user_audio(new_audio_data, filename, user.id)) ## Error: No running event loop
-        
-    async def transcribe_user_audio(self, audio_data, filename, user_id):
-        self.active_transcriptions += 1
-        textResult = None
-        try:
-            asr_data = bytes_to_float32_array(audio_data)
-            start_time = datetime.now()
-            # loop = asyncio.get_event_loop()
-            # future = loop.run_in_executor(None, self.asr, asr_data)
-            # text = await future
-            text = self.asr(asr_data)
-            textResult = text['text']
-            end_time = datetime.now()
-            elapsed_time = end_time - start_time
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logging.error("Error transcribing user audio: ")
-            logging.error(e)
-        finally:
-            self.active_transcriptions -= 1
-            # self.user_audio[user_id]['text']
-            if (textResult == None):
-                return
+    
+    async def transcribing(self):
+        while True:
+            # Check if there are audio to transcribe and under which user
+            if len(self.transcribe_users) > 0:
+                self.active_transcriptions += 1
+                for i, user_id in enumerate(self.transcribe_users.copy()):
+                    # self.user_audio[user_id]
+                    # Loop through self.user_audio[user_id]['text] and find the one that are bytearray instead of string and call transcribe audo on that bytearray and switch it out with the result
+                    for i, item in enumerate(self.user_audio[user_id]['text']):
+                        if isinstance(item, bytearray):
+                            transcribed_text = await self.transcribe_audio(item)
+                            logging.info(f"Transcribed text: {transcribed_text}")
+                            if transcribed_text is not None:
+                                self.user_audio[user_id]['text'][i] = transcribed_text
+                                self.new_messages = True
+                            else:
+                                self.user_audio[user_id]['text'][i] = "!ERROR!"
+                            # self.user_audio[user_id]['text'][i] = await self.asr.transcribe_audio(item)
 
-            # self.user_audio[user_id]['processed_audio'].extend(audio_data)
-            # self.user_audio[user_id]['started_speaking'] = None
-            self.new_messages = True
-            logging.info(f"Result: {textResult}, Time taken: {elapsed_time.total_seconds():.2f} seconds")
-            # Replace filename string with text result
-            for i, str in enumerate(self.user_audio[user_id]['text']):
-                if str == filename:
-                    self.user_audio[user_id]['text'][i] = textResult.strip()
-                    break
+                    self.transcribe_users.remove(user_id)
+                self.active_transcriptions -= 1
+            else:
+                await asyncio.sleep(1)
+           
+            
+    async def responding(self):
+        while True:
+            if self.active_transcriptions == 0 and self.new_messages:
+                if datetime.now() - self.last_active > timedelta(seconds=1):
+                    self.new_messages = False
+                    logging.info("RESPONDING....")
+                    self.save_new_messages() # Call the function when all transcriptions are done and channel is silent for 1 second
+            await asyncio.sleep(1)
+            
                 
-            # if self.active_transcriptions == 0:
-            #     if datetime.now() - self.last_active > timedelta(seconds=1):
-            #         self.on_silence() # Call the function when all transcriptions are done and channel is silent for 1 second
- 
-    async def transcribe_audio(self, audio_data):
-        textResult = None
-        try:
-            asr_data = bytes_to_float32_array(audio_data)
-            loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(None, self.asr, asr_data)
-            # text = self.asr(asr_data)
-            textResult = text['text']
-        except Exception as e:
-            logging.error("Error transcribing audio")
-            logging.error(e)
-        finally:
-            if (textResult == None):
-                return None
-            # logging.info(f"Transcription: {textResult}")
-            return textResult
-                
-    def on_silence(self):
+    def save_new_messages(self):
         text_items = []
         new_messages = []
         for user_id, userdata in self.user_audio.items():
@@ -218,16 +151,9 @@ class VoiceChat:
                 # Save in redis!
                 self.save_message(item['text'], item['user_id'], item['username'])
             
-            # Respond to all newly saved messages
-            # await self.respond(new_messages)
+            # Respond to all newly saved messages or new_messages if no redis
             if self.active_transcriptions == 0:
                 self.ollama_task = asyncio.create_task(self.respond(new_messages))
-                # await self.respond(new_messages)
-                # self.ollama_task = loop_handler.run_coroutine(self.respond(new_messages))
-                # new_loop = asyncio.new_event_loop()
-                # thread = threading.Thread(target=start_async_loop, args=(self.respond(new_messages), new_loop))
-                # thread.start()
-                # thread.daemon = True
     
     
     async def respond(self, messages=[]):
@@ -293,7 +219,6 @@ class VoiceChat:
             wav_file.setframerate(framerate)  # sample rate
             wav_file.writeframes(audio_data)
 
-
     def convert_audio_data(self, audio_data) -> bytes:
         speech_device = "cuda:0" if torch.cuda.is_available() else "cpu"
         # Convert the audio data bytes to a numpy array
@@ -309,8 +234,7 @@ class VoiceChat:
         waveform_resampled_int16 = waveform_resampled.numpy().astype(np.int16)
         # Convert the 16-bit integers to bytes
         waveform_resampled_bytes = waveform_resampled_int16.tobytes()
-        return waveform_resampled_bytes
-    
+        return waveform_resampled_bytes    
     
     def get_current_model(self):
         try:
@@ -319,8 +243,7 @@ class VoiceChat:
         except Exception as e:
             logging.error(f"Error getting current model in voice channel: {e}")
             return []
-        
-    
+          
     def get_messages(self):
         try:
             messages = self.redis.lrange(f"messages:{self.vc.channel.id}", 0, -1)
@@ -334,9 +257,6 @@ class VoiceChat:
         except Exception as e:
             logging.error(f"Error getting voice messages: {e}")
             return []
-            
-            
-        
     
     def save_message(self, message, user_id, username):
         try:
@@ -349,3 +269,58 @@ class VoiceChat:
             }))
         except Exception as e:
             logging.error(f"Error saving voice message: {e}")
+ 
+    async def transcribe_audio(self, audio_data):
+        textResult = None
+        try:
+            asr_data = bytes_to_float32_array(audio_data)
+            loop = asyncio.get_running_loop()
+            text = await loop.run_in_executor(None, self.asr, asr_data)
+            # text = self.asr(asr_data)
+            textResult = text['text']
+        except Exception as e:
+            logging.error("Error transcribing audio")
+            logging.error(e)
+        finally:
+            if (textResult == None):
+                return None
+            return textResult
+            
+        
+    # async def transcribe_user_audio(self, audio_data, filename, user_id):
+    #     self.active_transcriptions += 1
+    #     textResult = None
+    #     try:
+    #         asr_data = bytes_to_float32_array(audio_data)
+    #         start_time = datetime.now()
+    #         # loop = asyncio.get_event_loop()
+    #         # future = loop.run_in_executor(None, self.asr, asr_data)
+    #         # text = await future
+    #         text = self.asr(asr_data)
+    #         textResult = text['text']
+    #         end_time = datetime.now()
+    #         elapsed_time = end_time - start_time
+    #     except asyncio.CancelledError:
+    #         pass
+    #     except Exception as e:
+    #         logging.error("Error transcribing user audio: ")
+    #         logging.error(e)
+    #     finally:
+    #         self.active_transcriptions -= 1
+    #         # self.user_audio[user_id]['text']
+    #         if (textResult == None):
+    #             return
+
+    #         # self.user_audio[user_id]['processed_audio'].extend(audio_data)
+    #         # self.user_audio[user_id]['started_speaking'] = None
+    #         self.new_messages = True
+    #         logging.info(f"Result: {textResult}, Time taken: {elapsed_time.total_seconds():.2f} seconds")
+    #         # Replace filename string with text result
+    #         for i, str in enumerate(self.user_audio[user_id]['text']):
+    #             if str == filename:
+    #                 self.user_audio[user_id]['text'][i] = textResult.strip()
+    #                 break
+                
+    #         # if self.active_transcriptions == 0:
+    #         #     if datetime.now() - self.last_active > timedelta(seconds=1):
+    #         #         self.on_silence() # Call the function when all transcriptions are done and channel is silent for 1 second
