@@ -19,7 +19,6 @@ from .misc import *
 
 
 loop_handler = AsyncLoopThread()
-response_handler = AsyncLoopThread()
 
 
 ## This will listen to user audio in connected voice channel and save it to a file when user stops speaking for 2 seconds
@@ -31,19 +30,44 @@ class VoiceChat:
         self.ollama = discOllama.ollama
         self.redis = discOllama.redis
         self.asr = discOllama.asr
-        
-        self.last_active = datetime.now()
-        
-        self.new_messages = False
-        self.silence_detected = False
         self.user_audio = {}
+        self.last_active = datetime.now()
+        self.new_messages = False
         self.active_transcriptions = 0
-        self.res_thread = None
         
-        # self.res_task = asyncio.create_task(self.responding())
+        self.transcribe_users = []
         
         self.vc.listen(voice_recv.BasicSink(self.listen))
         
+        self.transcribe_task = asyncio.create_task(self.transcribing())
+        self.respond_task = asyncio.create_task(self.responding())
+        self.ollama_task = None
+        
+    async def transcribing(self):
+        while True:
+            # Check if there are audio to transcribe and under which user
+            # In listen, add new variable that will keep track of users who have audio that can be transcribed
+            if len(self.transcribe_users) > 0:
+                self.active_transcriptions += 1
+                for i, user_id in enumerate(self.transcribe_users.copy()):
+                    # self.user_audio[user_id]
+                    # Loop through self.user_audio[user_id]['text] and find the one that are bytearray instead of string and call transcribe audo on that bytearray and switch it out with the result
+                    for i, item in enumerate(self.user_audio[user_id]['text']):
+                        if isinstance(item, bytearray):
+                            transcribed_text = await self.transcribe_audio(item)
+                            logging.info(f"Transcribed text: {transcribed_text}")
+                            if transcribed_text is not None:
+                                self.user_audio[user_id]['text'][i] = transcribed_text
+                                self.new_messages = True
+                            else:
+                                self.user_audio[user_id]['text'][i] = "!ERROR!"
+                            # self.user_audio[user_id]['text'][i] = await self.asr.transcribe_audio(item)
+
+                    self.transcribe_users.remove(user_id)
+                self.active_transcriptions -= 1
+            else:
+                await asyncio.sleep(1)
+            
     async def responding(self):
         while True:
             if self.active_transcriptions == 0 and self.new_messages:
@@ -57,9 +81,13 @@ class VoiceChat:
         if user is None:
             return
         
+        if self.ollama_task is not None:
+            logging.info("Cancelling ollama task")
+            self.ollama_task.cancel()
+            # loop_handler.cancel_task(self.ollama_task)
+            
         # loop_handler.stop_loop()
         self.last_active = datetime.now()
-        self.silence_detected = False
         
         audio_data = self.convert_audio_data(data.pcm)
         if user.id not in self.user_audio:
@@ -92,8 +120,11 @@ class VoiceChat:
                     return
                 
                 filename = f"audio/{user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.wav"
-                self.user_audio[user.id]['text'].append(filename) # Fill spot with filename so we can put the text in this position later
                 self.save_to_wav(filename, new_audio_data, channels=1, framerate=16000) # This is just while testing.
+                if user.id not in self.transcribe_users: # Add user_id to list so it can be processed
+                    self.transcribe_users.append(user.id)
+                self.user_audio[user.id]['text'].append(new_audio_data) # Fill spot with audio bytearray so we can transcribe it and switch it out with text
+                # self.user_audio[user.id]['text'].append(filename) # Fill spot with filename so we can put the text in this position later
                 self.user_audio[user.id]['processed_audio'].extend(new_audio_data)
                 self.user_audio[user.id]['started_speaking'] = None
                 
@@ -102,7 +133,7 @@ class VoiceChat:
                 # self.transcribe_user_audio(new_audio_data, filename, user.id) # This blocks it from listening until it's done transcribing
                 
                 # # self.test_task = asyncio.create_task(self.transcribe_user_audio(new_audio_data, filename, user.id)) ## Error: No running event loop
-            
+        
     async def transcribe_user_audio(self, audio_data, filename, user_id):
         self.active_transcriptions += 1
         textResult = None
@@ -119,7 +150,7 @@ class VoiceChat:
         except asyncio.CancelledError:
             pass
         except Exception as e:
-            logging.error("Error transcribing audio: ")
+            logging.error("Error transcribing user audio: ")
             logging.error(e)
         finally:
             self.active_transcriptions -= 1
@@ -141,6 +172,23 @@ class VoiceChat:
             #     if datetime.now() - self.last_active > timedelta(seconds=1):
             #         self.on_silence() # Call the function when all transcriptions are done and channel is silent for 1 second
  
+    async def transcribe_audio(self, audio_data):
+        textResult = None
+        try:
+            asr_data = bytes_to_float32_array(audio_data)
+            loop = asyncio.get_running_loop()
+            text = await loop.run_in_executor(None, self.asr, asr_data)
+            # text = self.asr(asr_data)
+            textResult = text['text']
+        except Exception as e:
+            logging.error("Error transcribing audio")
+            logging.error(e)
+        finally:
+            if (textResult == None):
+                return None
+            # logging.info(f"Transcription: {textResult}")
+            return textResult
+                
     def on_silence(self):
         text_items = []
         new_messages = []
@@ -173,9 +221,9 @@ class VoiceChat:
             # Respond to all newly saved messages
             # await self.respond(new_messages)
             if self.active_transcriptions == 0:
+                self.ollama_task = asyncio.create_task(self.respond(new_messages))
                 # await self.respond(new_messages)
-                loop_handler.run_coroutine(self.respond(new_messages))
-                # response_handler.run_coroutine(self.respond(new_messages))
+                # self.ollama_task = loop_handler.run_coroutine(self.respond(new_messages))
                 # new_loop = asyncio.new_event_loop()
                 # thread = threading.Thread(target=start_async_loop, args=(self.respond(new_messages), new_loop))
                 # thread.start()
@@ -193,26 +241,20 @@ class VoiceChat:
             logging.info("Responding to messages: " + str(saved_messages))
             
             current_model = self.get_current_model()
-            full_response = ""        # ollama, model, messages
-            # async for part in self.ollama.chat(current_model, messages=saved_messages, stream=True):
-            # chat_iterator = await self.ollama.chat(current_model, messages=saved_messages, stream=True)
-            # async for part in chat_iterator:
+            full_response = ""
             async for part in self.discOllama.chat(saved_messages, milliseconds=None, model=current_model):
                 part_content = part['message']['content']
                 # logging.info(f"Part: {part_content}")
                 full_response += part_content
                 
-            logging.info("Full response: " + full_response)
-                    
-            # await response.write('')
         except asyncio.CancelledError:
             logging.info("Responding cancelled")
         except Exception as e:
             logging.error("Error answering")
             logging.error(e)
         finally:
-            # logging.info("FINALLY RESPOND: " + full_response)
-            pass
+            logging.info("FINALLY RESPOND: " + full_response)
+            self.ollama_task = None
         
 
     async def test(self):

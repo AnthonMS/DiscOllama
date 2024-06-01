@@ -25,7 +25,7 @@ $: ollama create openhermes-voice --file openhermes-voice.modelfile
 $: docker pull redis
 $: docker run -d --name my-redis-container -p 6379:6379 redis
 $: docker start my-redis-container
-$: docker exec -it 593d15ed477c redis-cli FLUSHALL
+$: docker exec -it 939e5bf8961723016fd200b51f21edafa02331716f70f33e5d4e508c40e18895 redis-cli FLUSHALL
 
 
 

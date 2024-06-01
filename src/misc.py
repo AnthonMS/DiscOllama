@@ -139,6 +139,178 @@ def get_audio_duration(audio_data, sample_rate=16000):
         return 0
     
     
+
+
+## For sure working
+# class AsyncLoopThread:
+#     def __init__(self):
+#         self.loop = None
+#         self.thread = threading.Thread(target=self.start_loop, daemon=True)
+#         self.coroutine_queue = deque()
+#         self.last_execution_time = time.time()
+#         self.group_delay = 1  # seconds to wait before grouping and executing coroutines
+#         self.thread.start()
+
+#     def start_loop(self):
+#         self.loop = asyncio.new_event_loop()
+#         asyncio.set_event_loop(self.loop)
+#         self.loop.create_task(self.manage_coroutines())
+#         self.loop.run_forever()
+
+#     def stop_loop(self):
+#         self.loop.call_soon_threadsafe(self.loop.stop)
+#         self.thread.join()
+
+#     def run_coroutine(self, coro):
+#         future = asyncio.run_coroutine_threadsafe(self.enqueue_coroutine(coro), self.loop)
+#         return future
+
+#     async def enqueue_coroutine(self, coro):
+#         self.coroutine_queue.append(coro)
+#         return "Coroutine enqueued"
+
+#     async def manage_coroutines(self):
+#         while True:
+#             await asyncio.sleep(0.1)  # Check every 100ms
+#             if self.coroutine_queue and (time.time() - self.last_execution_time >= self.group_delay):
+#                 self.last_execution_time = time.time()
+#                 await self.execute_coroutines()
+
+#     async def execute_coroutines(self):
+#         coroutines = []
+#         while self.coroutine_queue:
+#             coroutines.append(self.coroutine_queue.popleft())
+#         if coroutines:
+#             grouped = asyncio.gather(*coroutines)
+#             results = await grouped
+#             print("Executed grouped coroutines:", results)
+
+
+
+
+class AsyncLoopThread:
+    def __init__(self):
+        self.loop = None
+        self.thread = threading.Thread(target=self.start_loop, daemon=True)
+        self.coroutine_queue = deque()
+        self.tasks = {}  # Dictionary to track tasks
+        self.last_execution_time = time.time()
+        self.group_delay = 1  # seconds to wait before grouping and executing coroutines
+        self.thread.start()
+
+    def start_loop(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.create_task(self.manage_coroutines())
+        self.loop.run_forever()
+
+    def stop_loop(self):
+        self.loop.call_soon_threadsafe(self.loop.stop)
+        self.thread.join()
+
+    def run_coroutine(self, coro):
+        """Enqueue coroutine to be run in the asyncio loop."""
+        future = asyncio.run_coroutine_threadsafe(self.enqueue_coroutine(coro), self.loop)
+        return future
+
+    async def enqueue_coroutine(self, coro):
+        """Add coroutine to the queue and return a future representing the task."""
+        task = self.loop.create_task(coro)
+        self.tasks[task] = coro
+        return task
+
+    async def manage_coroutines(self):
+        while True:
+            await asyncio.sleep(0.1)  # Check every 100ms
+            if self.coroutine_queue and (time.time() - self.last_execution_time >= self.group_delay):
+                self.last_execution_time = time.time()
+                await self.execute_coroutines()
+
+    async def execute_coroutines(self):
+        coroutines = []
+        while self.coroutine_queue:
+            coro = self.coroutine_queue.popleft()
+            coroutines.append(coro)
+        if coroutines:
+            tasks = [self.loop.create_task(coro) for coro in coroutines]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            print("Executed grouped coroutines:", results)
+
+    def cancel_task(self, task):
+        """Cancel a specific task."""
+        if task in self.tasks:
+            task.cancel()
+            del self.tasks[task]
+
+    def cancel_all_tasks(self):
+        """Cancel all tasks in the event loop."""
+        for task in list(self.tasks):
+            task.cancel()
+            del self.tasks[task]
+            
+# class AsyncLoopThread:
+#     def __init__(self):
+#         self.loop = None
+#         self.thread = threading.Thread(target=self.start_loop, daemon=True)
+#         self.coroutine_queue = deque()
+#         self.last_execution_time = time.time()
+#         self.group_delay = 1  # seconds to wait before grouping and executing coroutines
+#         self.thread.start()
+
+#     def start_loop(self):
+#         self.loop = asyncio.new_event_loop()
+#         asyncio.set_event_loop(self.loop)
+#         self.loop.create_task(self.manage_coroutines())
+#         self.loop.run_forever()
+
+#     def stop_loop(self):
+#         self.loop.call_soon_threadsafe(self.loop.stop)
+#         self.thread.join()
+
+#     def run_coroutine(self, coro):
+#         """Enqueue coroutine to be run in the asyncio loop."""
+#         asyncio.run_coroutine_threadsafe(self.enqueue_coroutine(coro), self.loop)
+
+#     async def enqueue_coroutine(self, coro):
+#         """Add coroutine to the queue."""
+#         self.coroutine_queue.append(coro)
+
+#     async def manage_coroutines(self):
+#         while True:
+#             await asyncio.sleep(0.1)  # Check every 100ms
+#             if self.coroutine_queue and (time.time() - self.last_execution_time >= self.group_delay):
+#                 self.last_execution_time = time.time()
+#                 await self.execute_coroutines()
+
+#     async def execute_coroutines(self):
+#         coroutines = []
+#         while self.coroutine_queue:
+#             coro = self.coroutine_queue.popleft()
+#             coroutines.append(coro)
+#         if coroutines:
+#             # Create asyncio tasks for each coroutine within the loop
+#             tasks = [self.loop.create_task(coro) for coro in coroutines]
+#             results = await asyncio.gather(*tasks, return_exceptions=True)
+#             print("Executed grouped coroutines:", results)
+
+#     def cancel_all_tasks(self):
+#         """Cancel all tasks in the event loop."""
+#         for task in asyncio.all_tasks(self.loop):
+#             task.cancel()
+            
+#     def cancel_task(self, future):
+#         """Cancel a specific future."""
+#         if future in self.future_queue:
+#             future.cancel()
+#             self.future_queue.remove(future)
+
+
+
+
+
+
+
+
         
         
 # class AsyncLoopThread:
@@ -178,48 +350,6 @@ def get_audio_duration(audio_data, sample_rate=16000):
 #             results = await grouped
 #             print("Executed grouped coroutines:", results)      
 
-class AsyncLoopThread:
-    def __init__(self):
-        self.loop = None
-        self.thread = threading.Thread(target=self.start_loop, daemon=True)
-        self.coroutine_queue = deque()
-        self.last_execution_time = time.time()
-        self.group_delay = 1  # seconds to wait before grouping and executing coroutines
-        self.thread.start()
-
-    def start_loop(self):
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
-        self.loop.create_task(self.manage_coroutines())
-        self.loop.run_forever()
-
-    def stop_loop(self):
-        self.loop.call_soon_threadsafe(self.loop.stop)
-        self.thread.join()
-
-    def run_coroutine(self, coro):
-        future = asyncio.run_coroutine_threadsafe(self.enqueue_coroutine(coro), self.loop)
-        return future
-
-    async def enqueue_coroutine(self, coro):
-        self.coroutine_queue.append(coro)
-        return "Coroutine enqueued"
-
-    async def manage_coroutines(self):
-        while True:
-            await asyncio.sleep(0.1)  # Check every 100ms
-            if self.coroutine_queue and (time.time() - self.last_execution_time >= self.group_delay):
-                self.last_execution_time = time.time()
-                await self.execute_coroutines()
-
-    async def execute_coroutines(self):
-        coroutines = []
-        while self.coroutine_queue:
-            coroutines.append(self.coroutine_queue.popleft())
-        if coroutines:
-            grouped = asyncio.gather(*coroutines)
-            results = await grouped
-            print("Executed grouped coroutines:", results)
 
 ## When using this AsyncLoopThread class, it will transcribe all the audio files, even if more is coming while transcribing.
 # This is the correct behavior.
