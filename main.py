@@ -7,13 +7,16 @@ from dotenv import load_dotenv
 from src.DiscOllama import DiscOllama
 import torch
 import pyttsx3
-from transformers import pipeline, AutoModelForSpeechSeq2Seq, AutoProcessor
+from transformers import pipeline
+# from faster_whisper import WhisperModel # pip install faster-whisper / python3 -m pip install -U faster-whisper
+
 
 THIS_PATH = os.path.dirname(os.path.realpath(__file__))
 
 load_dotenv(f'{THIS_PATH}\\.env')
 logging.basicConfig(filename=f'{THIS_PATH}\\bot.log', level=logging.INFO, format='%(asctime)s %(message)s')
 
+os.environ["OMP_NUM_THREADS"] = "4"
 
 if __name__ == '__main__':
     intents = discord.Intents.default()
@@ -28,10 +31,13 @@ if __name__ == '__main__':
     # )
     # speech_model.to(speech_device)
     # speech_processor = AutoProcessor.from_pretrained(speech_model_id)
-    asr = pipeline('automatic-speech-recognition', model='openai/whisper-medium')
-    tts = pyttsx3.init()
-    # text = speech_processor('audio/audio_benteb3nt_0.wav')
-    # logging.info(text['text'])
+    
+    processing_device = "cuda" if torch.cuda.is_available() else "cpu"
+    compute_type = "float16" if processing_device == "cuda" else "float32"
+    # stt = WhisperModel("small", device=processing_device, compute_type=compute_type)
+    # model = WhisperModel("large-v3", device="cpu", compute_type="float32")
+    stt = pipeline('automatic-speech-recognition', model='openai/whisper-small') # whisper-medium
+    tts = pipeline("text-to-speech", model="suno/bark-small")
     
     disc = discord.Client(intents=intents)
     redis_host = str(os.getenv("REDIS_HOST"))
@@ -63,6 +69,6 @@ if __name__ == '__main__':
         llama,
         disc,
         redis_client,
-        asr,
+        stt,
         tts
     ).run(os.getenv("DISCORD_TOKEN"))

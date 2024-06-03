@@ -29,7 +29,7 @@ $: docker exec -it 939e5bf8961723016fd200b51f21edafa02331716f70f33e5d4e508c40e18
 
 
 
-
+docker exec -it 939e5bf8961723016fd200b51f21edafa02331716f70f33e5d4e508c40e18895 redis-cli FLUSHALL && python3 main.py
 
 
 

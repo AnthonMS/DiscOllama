@@ -9,10 +9,26 @@ import torch
 import io
 from datetime import datetime, timedelta
 
+
+def check_end_of_sentance(str):
+    end_of_sentence_chars = ['.', '!', '?']
+    if str and str[-1] in end_of_sentence_chars:
+        return True
+    return False
+
+
 def start_async_loop(coro, loop):
     asyncio.set_event_loop(loop)
     loop.run_until_complete(coro)
     loop.close()
+
+
+def float32_array_to_bytes(audio_float32):
+    # De-normalize from float32 range -1.0 to 1.0 to int16 range
+    audio_int16 = (audio_float32 * 32768).astype(np.int16)
+    # Convert int16 numpy array to bytes
+    audio_bytes = audio_int16.tobytes()
+    return audio_bytes
 
 def bytes_to_float32_array(audio_bytes):
     # Convert bytes to int16 numpy array

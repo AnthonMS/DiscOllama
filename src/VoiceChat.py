@@ -24,19 +24,22 @@ class VoiceChat:
         self.discord = discOllama.discord
         self.ollama = discOllama.ollama
         self.redis = discOllama.redis
-        self.asr = discOllama.asr
+        self.stt = discOllama.stt
+        self.tts = discOllama.tts
         self.user_audio = {}
         self.last_active = datetime.now()
         self.new_messages = False
+        self.new_responses = False
         self.active_transcriptions = 0
-        
         self.transcribe_users = []
         
-        self.vc.listen(voice_recv.BasicSink(self.listen))
+        self.responses = []
         
         self.transcribe_task = asyncio.create_task(self.transcribing())
         self.respond_task = asyncio.create_task(self.responding())
+        # self.speaking_task = asyncio.create_task(self.speaking())
         self.ollama_task = None
+        self.vc.listen(voice_recv.BasicSink(self.listen))
         
     def listen(self, user, data: voice_recv.VoiceData):
         if user is None:
@@ -97,27 +100,46 @@ class VoiceChat:
                     # Loop through self.user_audio[user_id]['text] and find the one that are bytearray instead of string and call transcribe audo on that bytearray and switch it out with the result
                     for i, item in enumerate(self.user_audio[user_id]['text']):
                         if isinstance(item, bytearray):
+                            start_time = time.time()
                             transcribed_text = await self.transcribe_audio(item)
-                            logging.info(f"Transcribed text: {transcribed_text}")
+                            end_time = time.time()
+                            elapsed_time = end_time - start_time
+                            logging.info(f"Transcribed text in {elapsed_time:.2f}: {transcribed_text}")
+                            
                             if transcribed_text is not None:
                                 self.user_audio[user_id]['text'][i] = transcribed_text
                                 self.new_messages = True
                             else:
-                                self.user_audio[user_id]['text'][i] = "!ERROR!"
-                            # self.user_audio[user_id]['text'][i] = await self.asr.transcribe_audio(item)
+                                self.user_audio[user_id]['text'][i] = ""
 
                     self.transcribe_users.remove(user_id)
                 self.active_transcriptions -= 1
             else:
                 await asyncio.sleep(1)
+          
            
+    async def transcribe_audio(self, audio_data):
+        textResult = None
+        try:
+            asr_data = bytes_to_float32_array(audio_data)
+            loop = asyncio.get_running_loop()
+            text = await loop.run_in_executor(None, self.stt, asr_data)
+            textResult = text['text']
+        except Exception as e:
+            logging.error("Error transcribing audio")
+            logging.error(e)
+        finally:
+            if (textResult == None):
+                return None
+            return textResult
+            
+            
             
     async def responding(self):
         while True:
             if self.active_transcriptions == 0 and self.new_messages:
                 if datetime.now() - self.last_active > timedelta(seconds=1):
                     self.new_messages = False
-                    logging.info("RESPONDING....")
                     self.save_new_messages() # Call the function when all transcriptions are done and channel is silent for 1 second
             await asyncio.sleep(1)
             
@@ -147,8 +169,6 @@ class VoiceChat:
         if (len(text_items) > 0):
             text_items.sort(key=lambda x: x['time'])
             for item in text_items:
-                logging.info(f"{item['time']}: User {item['user_id']}: {item['text']}")
-                # Save in redis!
                 self.save_message(item['text'], item['user_id'], item['username'])
             
             # Respond to all newly saved messages or new_messages if no redis
@@ -164,14 +184,33 @@ class VoiceChat:
             if (len(saved_messages) == 0):
                 logging.info("No messages to respond to...")
                 return
-            logging.info("Responding to messages: " + str(saved_messages))
+            # logging.info("Responding to messages: " + str(saved_messages))
             
             current_model = self.get_current_model()
             full_response = ""
+            # TODO Check partial response if it has end-of-sentance
+            # Add to self.responses if there is a partial response
+            # Also: Check if there has been activity while generating
+            # If there is, it should check if there are new messages
+            # If there is, it should stop the generation, save the full_response it has generated so far to redis and clear self.responses
+            # Maybe do the pause playback/clear responses in the responding loop?
+            sentance = ""
             async for part in self.discOllama.chat(saved_messages, milliseconds=None, model=current_model):
                 part_content = part['message']['content']
-                # logging.info(f"Part: {part_content}")
                 full_response += part_content
+                sentance += part_content
+                if (check_end_of_sentance(sentance)):
+                    self.new_responses = True
+                    logging.info(f"New sentance: {sentance}")
+                    
+                    loop = asyncio.get_running_loop()
+                    audio = await loop.run_in_executor(None, self.tts, sentance)
+                    audioResult = audio['audio']
+                    self.responses.append({
+                        'text': sentance,
+                        'audio': audioResult,
+                    })
+                    sentance = ""
                 
         except asyncio.CancelledError:
             logging.info("Responding cancelled")
@@ -179,9 +218,30 @@ class VoiceChat:
             logging.error("Error answering")
             logging.error(e)
         finally:
-            logging.info("FINALLY RESPOND: " + full_response)
+            logging.info("Full Response: " + full_response)
             self.ollama_task = None
         
+
+    async def speaking(self):
+        while True:
+            logging.info(f"Checking for text to make into audio... {self.new_responses} : {str(self.responses)}")
+            # # Check if there are responses in self.responses
+            # # If there are, then we should start making them into audio that can be played.
+            # # self.response is array of dicts that contain text, audio, state: "None","Speaking","Paused"
+            # # audio is None unless the text has been made into TTS
+            if self.new_responses:
+                logging.info(f"There are new responses to generate tts for...")
+                for response in self.responses:
+                    logging.info(f"Response?: {response.text}")
+                    # if (response['audio'] == None):
+                    #     logging.info(f"Generating TTS for: {response.text}")
+                    #     # output = self.tts(response.text)
+                    #     # for key, value in output.items():
+                    #     #     logging.info(f"Key: {key}")
+                    # else:
+                    #     logging.info(f"NOT? Generating TTS for: {response.text}")
+            await asyncio.sleep(1)
+            
 
     async def test(self):
         logging.info("Test from VoiceChat")
@@ -270,23 +330,38 @@ class VoiceChat:
         except Exception as e:
             logging.error(f"Error saving voice message: {e}")
  
-    async def transcribe_audio(self, audio_data):
-        textResult = None
-        try:
-            asr_data = bytes_to_float32_array(audio_data)
-            loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(None, self.asr, asr_data)
-            # text = self.asr(asr_data)
-            textResult = text['text']
-        except Exception as e:
-            logging.error("Error transcribing audio")
-            logging.error(e)
-        finally:
-            if (textResult == None):
-                return None
-            return textResult
             
+       
+    # async def transcribe_audio_faster(self, audio_data): # Using faster-whisper, this was in fact not faster?
+    #     textResult = None
+    #     try:
+    #         processing_device = "cuda" if torch.cuda.is_available() else "cpu"
+    #         compute_type = "float16" if processing_device == "cuda" else "float32"
+    #         # Convert the audio data bytes to a numpy array and then to the appropriate type
+    #         audio_data = np.frombuffer(audio_data, dtype=np.int16).astype(np.float32) / 32768.0  # Normalize to [-1.0, 1.0]
+    #         audio_data = audio_data.astype(compute_type)  # Convert to the appropriate type
+            
+    #         # Assuming audio_data is a numpy array of the appropriate type
+    #         loop = asyncio.get_running_loop()
+    #         # segments, info = await loop.run_in_executor(None, self.stt.transcribe, audio_data)
+    #         # segments, info = await loop.run_in_executor(None, self.stt.transcribe, audio_data, beam_size=1)
+    #         segments, info = await loop.run_in_executor(None, 
+    #             lambda: self.stt.transcribe(audio_data, beam_size=1)
+    #         )
+
+    #         # Iterate over the segments to get the transcribed text
+    #         textResult = " ".join([segment.text for segment in segments])
+
+    #         logging.info(f"Detected language '{info.language}' with probability {info.language_probability}")
+    #     except Exception as e:
+    #         logging.error("Error transcribing audio")
+    #         logging.error(e)
+    #     finally:
+    #         if (textResult == None):
+    #             return None
+    #         return textResult
         
+         
     # async def transcribe_user_audio(self, audio_data, filename, user_id):
     #     self.active_transcriptions += 1
     #     textResult = None

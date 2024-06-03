@@ -12,13 +12,13 @@ from .VoiceChat import VoiceChat
 from .misc import *
 
 class DiscOllama:
-    def __init__(self, model, ollama, discord, redis, asr, tts):
+    def __init__(self, model, ollama, discord, redis, stt, tts):
         self.model = model
         self.model_voice = "openhermes-voice:latest"
         self.ollama = ollama
         self.discord = discord
         self.redis = redis
-        self.asr = asr
+        self.stt = stt
         self.tts = tts
         self.voice_chats = []
         
