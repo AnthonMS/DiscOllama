@@ -36,7 +36,7 @@ if __name__ == '__main__':
     compute_type = "float16" if processing_device == "cuda" else "float32"
     # stt = WhisperModel("small", device=processing_device, compute_type=compute_type)
     # model = WhisperModel("large-v3", device="cpu", compute_type="float32")
-    stt = pipeline('automatic-speech-recognition', model='openai/whisper-small') # whisper-medium
+    stt = pipeline('automatic-speech-recognition', model='openai/whisper-medium') # whisper-medium
     tts = pipeline("text-to-speech", "microsoft/speecht5_tts")
     
     disc = discord.Client(intents=intents)

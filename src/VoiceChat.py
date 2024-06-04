@@ -1,6 +1,8 @@
 import asyncio
 import functools
+from io import BytesIO
 import os
+import re
 import threading
 from collections import deque
 import time
@@ -41,11 +43,12 @@ class VoiceChat:
         tts_embeddings_dataset = load_dataset("Matthijs/cmu-arctic-xvectors", split="validation")
         self.speaker_embedding = torch.tensor(tts_embeddings_dataset[7306]["xvector"]).unsqueeze(0) # You can replace this embedding with your own as well. But where to find or create these embeddings?
         
+        self.vc.listen(voice_recv.BasicSink(self.listen))
         self.transcribe_task = asyncio.create_task(self.transcribing())
         self.respond_task = asyncio.create_task(self.responding())
         self.speaking_task = asyncio.create_task(self.speaking())
         self.ollama_task = None
-        self.vc.listen(voice_recv.BasicSink(self.listen))
+        # await self.vc.channel.send(f"Ready!")
         
 
     def listen(self, user, data: voice_recv.VoiceData):
@@ -92,7 +95,6 @@ class VoiceChat:
                 if user.id not in self.transcribe_users: # Add user_id to list so it can be processed
                     self.transcribe_users.append(user.id)
                 self.user_audio[user.id]['text'].append(new_audio_data) # Fill spot with audio bytearray so we can transcribe it and switch it out with text later
-                # self.user_audio[user.id]['text'].append(filename) # Fill spot with filename so we can put the text in this position later
                 self.user_audio[user.id]['processed_audio'].extend(new_audio_data)
                 self.user_audio[user.id]['started_speaking'] = None
                 
@@ -130,7 +132,9 @@ class VoiceChat:
         try:
             asr_data = bytes_to_float32_array(audio_data)
             loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(None, self.stt, asr_data)
+            stt_func = functools.partial(self.stt, asr_data, generate_kwargs={"task": "translate"})
+            text = await loop.run_in_executor(None, stt_func)
+            # text = await loop.run_in_executor(None, self.stt, asr_data)
             textResult = text['text']
         except Exception as e:
             logging.error("Error transcribing audio")
@@ -191,38 +195,51 @@ class VoiceChat:
             if (len(saved_messages) == 0):
                 logging.info("No messages to respond to...")
                 return
-            saved_messages.append({"role": "system", "content": f"You are friendly ai friend chatting in voice chat. Timestamps in messages from users should be ignored unless relevant in conversation. DO NOT FORMAT RESPONSES WITH TIMESTAMPS OR SENT BY!"})
-            
+            sys_msg = f"Timestamps in messages should be ignored unless relevant in conversation. DO NOT FORMAT RESPONSE WITH TIMESTAMPS OR SENT BY! Keep responses short and relevant."
+            saved_messages.insert(0, {"role": "system", "content": sys_msg})
+            # saved_messages.append({"role": "system", "content": f"You are friendly ai friend chatting in voice chat. Timestamps in messages from users should be ignored unless relevant in conversation. DO NOT FORMAT RESPONSES WITH TIMESTAMPS OR SENT BY!"})
+            logging.info(f"saved_messages: {str(saved_messages)}")
             current_model = self.get_current_model()
             full_response = ""
-            sentance = ""
+            sentence = ""
             async for part in self.discOllama.chat(saved_messages, milliseconds=None, model=current_model):
                 part_content = part['message']['content']
+                # logging.info(f"Part: {part_content}")
                 full_response += part_content
-                sentance += part_content
-                ## TODO: Check for voice activity, if there is, we should cancel response generation and just skip to the Finally clause
-                if (check_end_of_sentance(sentance)):
-                    logging.info(f"New sentance: {sentance}")
-                    ## TODO: Run in executor to not block heartbeat, but we need to pass multiple parameters
+                sentence += part_content
+                
+                if (sentence.strip().startswith("`")):
+                    pattern_single_backticks = r"^`[^`]+`$"
+                    pattern_triple_backticks = r"^```[^`]+```$"
+                    if re.match(pattern_single_backticks, sentence.strip()) or re.match(pattern_triple_backticks, sentence.strip()):
+                        logging.info(f"New code response: {sentence}")
+                        self.responses.append({
+                            'text': sentence.strip(),
+                            'type': 'code',
+                            'status': 'ready',
+                        })
+                        self.new_responses = True
+                        sentence = ""
+                elif (check_end_of_sentence(sentence)):
+                    logging.info(f"New sentence: {sentence}")
                     loop = asyncio.get_running_loop()
-                    tts_partial = functools.partial(self.tts, sentance, forward_params={"speaker_embeddings": self.speaker_embedding})
+                    tts_partial = functools.partial(self.tts, sentence, forward_params={"speaker_embeddings": self.speaker_embedding})
                     speech = await loop.run_in_executor(None, tts_partial)
-                    # speech = self.tts(sentance, forward_params={"speaker_embeddings": self.speaker_embedding})
-                    
                     audio_data = np.int16(speech["audio"] * 32767)
                     audio_data = audio_data.tobytes()
                     
                     random_filename = f"audio/responses/{uuid.uuid4()}.wav"
                     self.save_to_wav(random_filename, audio_data, channels=1, framerate=speech["sampling_rate"])
                     self.responses.append({
-                        'text': sentance.strip(),
+                        'text': sentence.strip(),
+                        'type': 'audio',
                         'audio': audio_data,
                         'sampling_rate': speech["sampling_rate"],
                         'status': 'ready',
-                        'path': random_filename
+                        # 'path': random_filename
                     })
                     self.new_responses = True
-                    sentance = ""
+                    sentence = ""
                 
         except asyncio.CancelledError:
             logging.info("Responding cancelled")
@@ -237,21 +254,51 @@ class VoiceChat:
 
     async def speaking(self):
         while True:
-            # logging.info(f"Checking for text to make into audio... {self.new_responses} : {str(self.responses)}")
-            # # Check if there are responses in self.responses
-            # # If there are, then we should start making them into audio that can be played.
-            # # self.response is array of dicts that contain text, audio, state: "None","Speaking","Paused"
-            # # audio is None unless the text has been made into TTS
-            if self.new_responses:
-                if not self.vc.is_playing():
-                    next_response = self.responses.pop(0)
-                    # self.vc.send_audio_packet(next_response['audio'])
-                    source = FFmpegPCMAudio(next_response['path'])
-                    # source = FFmpegPCMAudio(next_response['audio'])
-                    self.vc.play(source)
+            if self.new_responses and len(self.responses) > 0:
+                # Check if next response is code or text
                 
+                next_response = self.responses.pop(0)
+                if next_response['type'] == 'audio':
+                    if not self.vc.is_playing():
+                        logging.info(f"Playing sentence: {next_response['text']}")
+                        ffmpeg_options = {
+                            'before_options': f"-f s16le -ar {next_response['sampling_rate']} -ac 1",  # Format: 16-bit PCM, 48kHz, mono
+                            'options': '-vn'  # No video
+                        }
+                        file_like = BytesIO(next_response['audio'])
+                        source = FFmpegPCMAudio(file_like, pipe=True, **ffmpeg_options)
+                        self.vc.play(source)
+                elif next_response['type'] == 'code':
+                    # Send the text in voice channel
+                    text = next_response['text']
+                    if len(text) > 1900:
+                        # TODO: Better splitting of codeblocks, every message should be formatted with the correct codetype
+                        chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
+                        for i, chunk in chunks:
+                            if (i == 0):
+                                await self.vc.channel.send(chunk + "\n```")
+                            elif i == len(chunks)-1:
+                                await self.vc.channel.send("```\n" + chunk)
+                            else:
+                                await self.vc.channel.send("```\n" + chunk + "\n```")
+                    else:
+                        await self.vc.channel.send(text)
+                elif next_response['type'] == 'text':
+                    text = next_response['text']
+                    if len(text) > 1900:
+                        # split up text into chunks of maximum of 1900 characters, loop over chunks and send each
+                        chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
+                        for i, chunk in chunks:
+                            if i == len(chunks)-1:
+                                await self.vc.channel.send(chunk)
+                            else:
+                                await self.vc.channel.send(chunk + "...")
+                    else:
+                        await self.vc.channel.send(text)
+                        
                 if len(self.responses) == 0:
                     self.new_responses = False
+                
                 
             await asyncio.sleep(0.1)
             
@@ -265,14 +312,14 @@ class VoiceChat:
             return
         logging.info("Responding to messages: " + str(saved_messages))
         
-        current_model = self.get_current_model()
-        full_response = ""
-        async for part in self.discOllama.chat(saved_messages, milliseconds=None, model=current_model):
-            part_content = part['message']['content']
-            logging.info(f"Part: {part_content}")
-            full_response += part_content
+        # current_model = self.get_current_model()
+        # full_response = ""
+        # async for part in self.discOllama.chat(saved_messages, milliseconds=None, model=current_model):
+        #     part_content = part['message']['content']
+        #     logging.info(f"Part: {part_content}")
+        #     full_response += part_content
             
-        logging.info("Full response: " + full_response)
+        # logging.info("Full response: " + full_response)
         
     def save_to_wav(self, filename, audio_data, channels=2, sampwidth=2, framerate=48000):
         # Write audio data to a WAV file
@@ -322,6 +369,9 @@ class VoiceChat:
             return []
     
     def save_message(self, message, user_id, username=""):
+        if (message == None or len(message) == 0):
+            logging.error("Error saving message: message cannot empty")
+            return
         try:
             if user_id is not self.discord.user.id:
                 message = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '\n\n' + message + "\n\nSent by: " + username

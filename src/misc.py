@@ -10,8 +10,8 @@ import io
 from datetime import datetime, timedelta
 
 
-def check_end_of_sentance(str):
-    end_of_sentence_chars = ['.', '!', '?']
+def check_end_of_sentence(str):
+    end_of_sentence_chars = ['.', '!', '?', ':']
     if str and str[-1] in end_of_sentence_chars:
         return True
     return False
