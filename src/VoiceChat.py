@@ -1,9 +1,11 @@
 import asyncio
+import functools
 import os
 import threading
 from collections import deque
 import time
 import json
+import uuid
 import wave
 from datetime import datetime, timedelta
 import logging
@@ -13,7 +15,9 @@ import torchaudio
 from discord import FFmpegPCMAudio
 from discord import SpeakingState
 from discord.ext import voice_recv
+from discord import FFmpegPCMAudio
 from .misc import *
+from datasets import load_dataset
 
 
 ## This will listen to user audio in connected voice channel and save it to a file when user stops speaking for 2 seconds
@@ -32,15 +36,18 @@ class VoiceChat:
         self.new_responses = False
         self.active_transcriptions = 0
         self.transcribe_users = []
-        
         self.responses = []
+        
+        tts_embeddings_dataset = load_dataset("Matthijs/cmu-arctic-xvectors", split="validation")
+        self.speaker_embedding = torch.tensor(tts_embeddings_dataset[7306]["xvector"]).unsqueeze(0) # You can replace this embedding with your own as well. But where to find or create these embeddings?
         
         self.transcribe_task = asyncio.create_task(self.transcribing())
         self.respond_task = asyncio.create_task(self.responding())
-        # self.speaking_task = asyncio.create_task(self.speaking())
+        self.speaking_task = asyncio.create_task(self.speaking())
         self.ollama_task = None
         self.vc.listen(voice_recv.BasicSink(self.listen))
         
+
     def listen(self, user, data: voice_recv.VoiceData):
         if user is None:
             return
@@ -184,32 +191,37 @@ class VoiceChat:
             if (len(saved_messages) == 0):
                 logging.info("No messages to respond to...")
                 return
-            # logging.info("Responding to messages: " + str(saved_messages))
+            saved_messages.append({"role": "system", "content": f"You are friendly ai friend chatting in voice chat. Timestamps in messages from users should be ignored unless relevant in conversation. DO NOT FORMAT RESPONSES WITH TIMESTAMPS OR SENT BY!"})
             
             current_model = self.get_current_model()
             full_response = ""
-            # TODO Check partial response if it has end-of-sentance
-            # Add to self.responses if there is a partial response
-            # Also: Check if there has been activity while generating
-            # If there is, it should check if there are new messages
-            # If there is, it should stop the generation, save the full_response it has generated so far to redis and clear self.responses
-            # Maybe do the pause playback/clear responses in the responding loop?
             sentance = ""
             async for part in self.discOllama.chat(saved_messages, milliseconds=None, model=current_model):
                 part_content = part['message']['content']
                 full_response += part_content
                 sentance += part_content
+                ## TODO: Check for voice activity, if there is, we should cancel response generation and just skip to the Finally clause
                 if (check_end_of_sentance(sentance)):
-                    self.new_responses = True
                     logging.info(f"New sentance: {sentance}")
-                    
+                    ## TODO: Run in executor to not block heartbeat, but we need to pass multiple parameters
                     loop = asyncio.get_running_loop()
-                    audio = await loop.run_in_executor(None, self.tts, sentance)
-                    audioResult = audio['audio']
+                    tts_partial = functools.partial(self.tts, sentance, forward_params={"speaker_embeddings": self.speaker_embedding})
+                    speech = await loop.run_in_executor(None, tts_partial)
+                    # speech = self.tts(sentance, forward_params={"speaker_embeddings": self.speaker_embedding})
+                    
+                    audio_data = np.int16(speech["audio"] * 32767)
+                    audio_data = audio_data.tobytes()
+                    
+                    random_filename = f"audio/responses/{uuid.uuid4()}.wav"
+                    self.save_to_wav(random_filename, audio_data, channels=1, framerate=speech["sampling_rate"])
                     self.responses.append({
-                        'text': sentance,
-                        'audio': audioResult,
+                        'text': sentance.strip(),
+                        'audio': audio_data,
+                        'sampling_rate': speech["sampling_rate"],
+                        'status': 'ready',
+                        'path': random_filename
                     })
+                    self.new_responses = True
                     sentance = ""
                 
         except asyncio.CancelledError:
@@ -219,28 +231,29 @@ class VoiceChat:
             logging.error(e)
         finally:
             logging.info("Full Response: " + full_response)
+            self.save_message(full_response, self.discord.user.id)
             self.ollama_task = None
         
 
     async def speaking(self):
         while True:
-            logging.info(f"Checking for text to make into audio... {self.new_responses} : {str(self.responses)}")
+            # logging.info(f"Checking for text to make into audio... {self.new_responses} : {str(self.responses)}")
             # # Check if there are responses in self.responses
             # # If there are, then we should start making them into audio that can be played.
             # # self.response is array of dicts that contain text, audio, state: "None","Speaking","Paused"
             # # audio is None unless the text has been made into TTS
             if self.new_responses:
-                logging.info(f"There are new responses to generate tts for...")
-                for response in self.responses:
-                    logging.info(f"Response?: {response.text}")
-                    # if (response['audio'] == None):
-                    #     logging.info(f"Generating TTS for: {response.text}")
-                    #     # output = self.tts(response.text)
-                    #     # for key, value in output.items():
-                    #     #     logging.info(f"Key: {key}")
-                    # else:
-                    #     logging.info(f"NOT? Generating TTS for: {response.text}")
-            await asyncio.sleep(1)
+                if not self.vc.is_playing():
+                    next_response = self.responses.pop(0)
+                    # self.vc.send_audio_packet(next_response['audio'])
+                    source = FFmpegPCMAudio(next_response['path'])
+                    # source = FFmpegPCMAudio(next_response['audio'])
+                    self.vc.play(source)
+                
+                if len(self.responses) == 0:
+                    self.new_responses = False
+                
+            await asyncio.sleep(0.1)
             
 
     async def test(self):
@@ -259,16 +272,6 @@ class VoiceChat:
             logging.info(f"Part: {part_content}")
             full_response += part_content
             
-        # response = await self.ollama.chat(current_model, messages=saved_messages, stream=False)
-        # full_response = response['message']['content']
-        
-        # async for part in self.discOllama.chat(saved_messages, milliseconds=None, model=current_model):
-        # async for part in self.ollama.chat(current_model, messages=saved_messages, stream=True):
-        # chat_iterator = await self.ollama.chat(current_model, messages=saved_messages, stream=True)
-        # async for part in chat_iterator:
-        #     part_content = part['message']['content']
-        #     logging.info(f"Part: {part_content}")
-        #     full_response += part_content
         logging.info("Full response: " + full_response)
         
     def save_to_wav(self, filename, audio_data, channels=2, sampwidth=2, framerate=48000):
@@ -318,10 +321,12 @@ class VoiceChat:
             logging.error(f"Error getting voice messages: {e}")
             return []
     
-    def save_message(self, message, user_id, username):
+    def save_message(self, message, user_id, username=""):
         try:
             if user_id is not self.discord.user.id:
                 message = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '\n\n' + message + "\n\nSent by: " + username
+            # else:
+            #     message = datetime.now().strftime('%Y-%m-%d %H:%M:%S') + '\n\n' + message
                 
             self.redis.rpush(f"messages:{self.vc.channel.id}", json.dumps({
                 "author": user_id,

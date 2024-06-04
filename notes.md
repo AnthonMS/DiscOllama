@@ -1,9 +1,11 @@
 pip install -U transformers torch
 pip install -U accelerate
 pip install -U numpy
-pip install -U soundfile
 pip install -U torchaudio
-pip install -U pyttsx3
+- pip install -U soundfile
+- pip install -U pyttsx3
+- pip install coqui-tts
+
 
 
 
@@ -52,3 +54,23 @@ pip install -U discord-ext-voice-recv
 ```
 
 When installed this way, there should be no problems.
+
+
+
+
+
+
+
+
+
+
+Setting up venv:
+
+# Create venv in project directory
+python3 -m venv ./
+
+On Unix or MacOS, using the bash shell: source /path/to/venv/bin/activate
+On Unix or MacOS, using the csh shell: source /path/to/venv/bin/activate.csh
+On Unix or MacOS, using the fish shell: source /path/to/venv/bin/activate.fish
+On Windows using the Command Prompt: path\to\venv\Scripts\activate.bat
+On Windows using PowerShell: path\to\venv\Scripts\Activate.ps1

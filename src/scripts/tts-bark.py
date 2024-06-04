@@ -34,7 +34,7 @@ model = BarkModel.from_pretrained("suno/bark-small").to(device)
 # model =  model.to_bettertransformer() # pip install optimum
 # model.enable_cpu_offload()
 processor = AutoProcessor.from_pretrained("suno/bark-small", torch_dtype=torch.float16)
-text_prompt = "Let's try generating speech, with Bark, a text-to-speech model."
+text_prompt = "Let's try generating speech with Bark, a text-to-speech model."
 start_time = time.time()
 inputs = processor(text_prompt, voice_preset="v2/en_speaker_6")
 output = model.generate(**inputs)
@@ -45,5 +45,5 @@ print(f"Elapsed time: {elapsed_time:.2f}")
 audio_data = output.detach().cpu().numpy()
 audio_data_int16 = np.int16(audio_data * 32767)
 sampling_rate = model.generation_config.sample_rate
-save_to_wav("audio/output.wav", audio_data_int16, channels=1, framerate=sampling_rate)
+save_to_wav("audio/out-bark.wav", audio_data_int16, channels=1, framerate=sampling_rate)
   

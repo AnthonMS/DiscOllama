@@ -658,10 +658,12 @@ class DiscOllama:
         
         voice_channel = message.author.voice.channel
         vc = await voice_channel.connect(cls=voice_recv.VoiceRecvClient)
-        await message.channel.send(f"Joined {voice_channel.name}!")
+        join_msg = await message.channel.send(f"Joining {voice_channel.name}...")
         
         chat = VoiceChat(vc, self)
         self.voice_chats.append(chat)
+        await join_msg.edit(content=f"Joined {voice_channel.name}!")
+        
         ## TODO: Add voice response to self.connected_vcs list so we can listen to multiple voice channels in multiple guilds
         # self.voice_response = VoiceResponse(vc, self)
         # def callback(user, data: voice_recv.VoiceData):
