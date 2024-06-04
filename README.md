@@ -5,6 +5,7 @@ DiscOllama is a Discord bot that uses Ollama as the backend LLM provider. It's d
 ## Features
 
 - Ollama LLM server integration: The bot uses Ollama to process and generate responses based on user input and past interactions.
+- Huggingface pipelines for ASR (Automatic Speech Recognition) and TTS (Text-to-Speech)
 - Nginx for secure reverse proxy to Ollama
 
 
@@ -27,3 +28,9 @@ Later edit: I have stumpled upon the official discollama discord bot used in the
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a pull request.
+
+If you know how to do async shit well, hit me up. As you can see from this repo, I need help. lol.
+If you know how to make the huggingface pipelines faster, hit me up, I would love to learn more about optimizing LLM usage and in general maybe get a better understanding of what is going on.
+
+
+Everything in this project is a learning experience for me. So don't judge me too negatively. Teach me instead.
