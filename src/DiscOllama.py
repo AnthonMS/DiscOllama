@@ -380,9 +380,6 @@ class DiscOllama:
         # await message.remove_reaction('🤔', self.discord.user)
         await react_thinking(message, self.discord.user)
         
-        ## TODO: Send as Thread? I think not.
-        # msg_thread = await message.channel.create_thread(name='List of available models', message=message, auto_archive_duration=60)
-        # await msg_thread.send(f"**Models:**\n{model_string}")
         await message.author.send(f"**Models:**\n{model_string}")
         
     async def handle_command_model(self,message):

@@ -16,6 +16,33 @@ def check_end_of_sentence(str):
         return True
     return False
 
+def split_code_block(codeblock, max_length=1900):
+    codeblock_type = codeblock.split('\n')[0].strip()
+    code = '\n'.join(codeblock.split('\n')[1:-1])  # Extract the code excluding the start and end markers
+    
+    if len(codeblock) <= max_length:
+        return [codeblock]
+    
+    # Split the code into chunks
+    chunks = []
+    current_chunk = []
+    current_length = len(codeblock_type) + 6  # `len(codeblock_type)` for the opening part + `6` for "```\n```\n"
+
+    for line in code.split('\n'):
+        if current_length + len(line) + 1 > max_length:  # +1 for the newline character
+            if current_chunk:  # Only add the chunk if it's not empty
+                chunks.append(f"{codeblock_type}\n{'\n'.join(current_chunk)}\n```")
+            current_chunk = []
+            current_length = len(codeblock_type) + 6
+        
+        current_chunk.append(line)
+        current_length += len(line) + 1  # +1 for the newline character
+    
+    # Append the last chunk
+    if current_chunk:
+        chunks.append(f"{codeblock_type}\n{'\n'.join(current_chunk)}\n```")
+    
+    return chunks
 
 def start_async_loop(coro, loop):
     asyncio.set_event_loop(loop)
@@ -102,7 +129,7 @@ def is_silence(audio_data, threshold=20):
 
     # Check if the array is empty after conversion
     if audio_array.size == 0:
-        logging.error("Converted audio array is empty.")
+        # logging.error("Converted audio array is empty.")
         return False 
 
     # Calculate Root Mean Square (RMS)
@@ -110,7 +137,7 @@ def is_silence(audio_data, threshold=20):
 
     # Check for NaN values which could arise from invalid operations
     if np.isnan(rms):
-        logging.info("RMS calculation resulted in NaN.")
+        # logging.info("RMS calculation resulted in NaN.")
         return False  
 
     return rms < threshold

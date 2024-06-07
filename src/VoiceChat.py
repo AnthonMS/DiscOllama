@@ -33,11 +33,10 @@ class VoiceChat:
         self.stt = discOllama.stt
         self.tts = discOllama.tts
         self.user_audio = {}
+        self.transcribe_users = []
         self.last_active = datetime.now()
         self.new_messages = False
-        self.new_responses = False
         self.active_transcriptions = 0
-        self.transcribe_users = []
         self.responses = []
         
         tts_embeddings_dataset = load_dataset("Matthijs/cmu-arctic-xvectors", split="validation")
@@ -48,15 +47,12 @@ class VoiceChat:
         self.respond_task = asyncio.create_task(self.responding())
         self.speaking_task = asyncio.create_task(self.speaking())
         self.ollama_task = None
-        # await self.vc.channel.send(f"Ready!")
         
 
     def listen(self, user, data: voice_recv.VoiceData):
         if user is None:
             return
         
-        if self.ollama_task is not None:
-            self.ollama_task.cancel()
             
         self.last_active = datetime.now()
         
@@ -79,19 +75,23 @@ class VoiceChat:
         time_speaking = self.user_audio[user.id]['last_spoke'] - self.user_audio[user.id]['started_speaking']
         
         if time_speaking >= timedelta(milliseconds=500):
+            # TODO: Create VAD (Voice activity Detection) algorithm so it doesnt cancel response generation when someone coughs or accidentally hits their mics. 
+            # # We only want to cancel when there are words to transcribe?
+            if self.ollama_task is not None:
+                self.ollama_task.cancel()
             # keys_to_process.append(user_id)
             audio_data = self.user_audio[user.id]['audio']
             processed_data = self.user_audio[user.id]['processed_audio']
-            new_audio_data = audio_data[len(processed_data):]
-            if len(new_audio_data) < 6400:
-                return # Audio less than 200ms, wait for more audio data
+            new_audio_data = audio_data[len(processed_data):] # Get accumulated bytearray since last processed audio
+            if len(new_audio_data) < 3200:
+                return # Audio less than 100ms, wait for more audio data
             
-            if is_silence(new_audio_data[-6400:], 5): # Past 200ms is very silent
+            if is_silence(new_audio_data[-3200:], 5): # Past 100ms is very silent
                 if is_silence(new_audio_data, 10): # Whole audio is silent
                     return
                 
-                filename = f"audio/{user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.wav"
-                self.save_to_wav(filename, new_audio_data, channels=1, framerate=16000) # This is just while testing.
+                # filename = f"audio/{user.id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.wav"
+                # self.save_to_wav(filename, new_audio_data, channels=1, framerate=16000) # This is just while testing.
                 if user.id not in self.transcribe_users: # Add user_id to list so it can be processed
                     self.transcribe_users.append(user.id)
                 self.user_audio[user.id]['text'].append(new_audio_data) # Fill spot with audio bytearray so we can transcribe it and switch it out with text later
@@ -105,8 +105,6 @@ class VoiceChat:
             if len(self.transcribe_users) > 0:
                 self.active_transcriptions += 1
                 for i, user_id in enumerate(self.transcribe_users.copy()):
-                    # self.user_audio[user_id]
-                    # Loop through self.user_audio[user_id]['text] and find the one that are bytearray instead of string and call transcribe audo on that bytearray and switch it out with the result
                     for i, item in enumerate(self.user_audio[user_id]['text']):
                         if isinstance(item, bytearray):
                             start_time = time.time()
@@ -172,6 +170,7 @@ class VoiceChat:
                     "role": "assistant" if user_id == self.discord.user.id else "user",
                     "content": text,
                 })
+                ## Clear user_audio data - It is not longer needed
                 userdata['text'] = []
                 userdata['started_speaking'] = None
                 userdata['processed_audio'] = bytearray()
@@ -198,7 +197,7 @@ class VoiceChat:
             sys_msg = f"Timestamps in messages should be ignored unless relevant in conversation. DO NOT FORMAT RESPONSE WITH TIMESTAMPS OR SENT BY! Keep responses short and relevant."
             saved_messages.insert(0, {"role": "system", "content": sys_msg})
             # saved_messages.append({"role": "system", "content": f"You are friendly ai friend chatting in voice chat. Timestamps in messages from users should be ignored unless relevant in conversation. DO NOT FORMAT RESPONSES WITH TIMESTAMPS OR SENT BY!"})
-            logging.info(f"saved_messages: {str(saved_messages)}")
+            # logging.info(f"saved_messages: {str(saved_messages)}")
             current_model = self.get_current_model()
             full_response = ""
             sentence = ""
@@ -212,18 +211,24 @@ class VoiceChat:
                     pattern_single_backticks = r"^`[^`]+`$"
                     pattern_triple_backticks = r"^```[^`]+```$"
                     if re.match(pattern_single_backticks, sentence.strip()) or re.match(pattern_triple_backticks, sentence.strip()):
-                        logging.info(f"New code response: {sentence}")
-                        self.responses.append({
-                            'text': sentence.strip(),
-                            'type': 'code',
-                            'status': 'ready',
-                        })
-                        self.new_responses = True
+                        ## Just send the code responses in text channel immidiately
+                        codeblock_chunks = split_code_block(sentence.strip(), 1900)
+                        for i, chunk in enumerate(codeblock_chunks):
+                            if len(codeblock_chunks) > 1:
+                                await self.vc.channel.send(f"Part {i+1}/{len(codeblock_chunks)}: \n{chunk}")
+                            else:
+                                await self.vc.channel.send(chunk)
+                                
+                        # self.responses.append({
+                        #     'text': sentence.strip(),
+                        #     'type': 'code',
+                        #     'status': 'ready',
+                        # })
                         sentence = ""
                 elif (check_end_of_sentence(sentence)):
-                    logging.info(f"New sentence: {sentence}")
+                    logging.info(f"New sentence: {sentence.strip()}")
                     loop = asyncio.get_running_loop()
-                    tts_partial = functools.partial(self.tts, sentence, forward_params={"speaker_embeddings": self.speaker_embedding})
+                    tts_partial = functools.partial(self.tts, sentence.strip(), forward_params={"speaker_embeddings": self.speaker_embedding})
                     speech = await loop.run_in_executor(None, tts_partial)
                     audio_data = np.int16(speech["audio"] * 32767)
                     audio_data = audio_data.tobytes()
@@ -238,7 +243,6 @@ class VoiceChat:
                         'status': 'ready',
                         # 'path': random_filename
                     })
-                    self.new_responses = True
                     sentence = ""
                 
         except asyncio.CancelledError:
@@ -247,60 +251,56 @@ class VoiceChat:
             logging.error("Error answering")
             logging.error(e)
         finally:
-            logging.info("Full Response: " + full_response)
+            # logging.info("Full Response: " + full_response)
             self.save_message(full_response, self.discord.user.id)
             self.ollama_task = None
         
 
     async def speaking(self):
         while True:
-            if self.new_responses and len(self.responses) > 0:
+            if len(self.responses) > 0:
                 # Check if next response is code or text
                 
-                next_response = self.responses.pop(0)
+                next_response = self.responses[0]
                 if next_response['type'] == 'audio':
                     if not self.vc.is_playing():
                         logging.info(f"Playing sentence: {next_response['text']}")
+                        next_response = self.responses.pop(0)
                         ffmpeg_options = {
                             'before_options': f"-f s16le -ar {next_response['sampling_rate']} -ac 1",  # Format: 16-bit PCM, 48kHz, mono
                             'options': '-vn'  # No video
                         }
                         file_like = BytesIO(next_response['audio'])
                         source = FFmpegPCMAudio(file_like, pipe=True, **ffmpeg_options)
-                        self.vc.play(source)
-                elif next_response['type'] == 'code':
-                    # Send the text in voice channel
-                    text = next_response['text']
-                    if len(text) > 1900:
-                        # TODO: Better splitting of codeblocks, every message should be formatted with the correct codetype
-                        chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
-                        for i, chunk in chunks:
-                            if (i == 0):
-                                await self.vc.channel.send(chunk + "\n```")
-                            elif i == len(chunks)-1:
-                                await self.vc.channel.send("```\n" + chunk)
-                            else:
-                                await self.vc.channel.send("```\n" + chunk + "\n```")
-                    else:
-                        await self.vc.channel.send(text)
-                elif next_response['type'] == 'text':
-                    text = next_response['text']
-                    if len(text) > 1900:
-                        # split up text into chunks of maximum of 1900 characters, loop over chunks and send each
-                        chunks = [text[i:i+1900] for i in range(0, len(text), 1900)]
-                        for i, chunk in chunks:
-                            if i == len(chunks)-1:
-                                await self.vc.channel.send(chunk)
-                            else:
-                                await self.vc.channel.send(chunk + "...")
-                    else:
-                        await self.vc.channel.send(text)
+                        loop = asyncio.get_running_loop()
+                        speak_partial = functools.partial(self.vc.play, source)
+                        speech = await loop.run_in_executor(None, speak_partial)
+                        # self.vc.play(source)
                         
-                if len(self.responses) == 0:
-                    self.new_responses = False
-                
-                
-            await asyncio.sleep(0.1)
+            else:
+                await asyncio.sleep(0.1)
+    
+    
+    async def speak(self):
+        """
+            Will take the next (first) item in self.responses, remove it and play it. If it exist.
+            Return nothing 
+        """
+        if len(self.responses) <= 0:
+            return 
+        
+        next_response = self.responses.pop(0)
+        logging.info(f"Playing sentence: {next_response['text']}")
+        ffmpeg_options = {
+            'before_options': f"-f s16le -ar {next_response['sampling_rate']} -ac 1",  # Format: 16-bit PCM, 48kHz, mono
+            'options': '-vn'  # No video
+        }
+        file_like = BytesIO(next_response['audio'])
+        source = FFmpegPCMAudio(file_like, pipe=True, **ffmpeg_options)
+        ## TODO: Create callback it can call when it finishes playing audio. It can play the next.
+        ## Call speak again when done
+        self.vc.play(source)
+        
             
 
     async def test(self):
